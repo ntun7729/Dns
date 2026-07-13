@@ -1,7 +1,7 @@
 serverAddr = "203.0.113.10"
 serverPort = 7000
 
-# Optional: uncomment only when FRPS uses token authentication.
+# Optional. Uncomment both lines only when FRPS uses token authentication.
 # auth.method = "token"
 # auth.token = "replace-with-render-secret"
 
