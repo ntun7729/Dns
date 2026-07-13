@@ -24,4 +24,4 @@ normalize_pem_env() {
 normalize_pem_env DOT_CERT_PEM
 normalize_pem_env DOT_KEY_PEM
 
-exec python /app/app/main.py
+exec python /app/app/enhanced_main.py
