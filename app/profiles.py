@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 import threading
 import urllib.parse
 import uuid
@@ -15,11 +16,15 @@ from settings import (
     MAX_PROFILES,
     RAW_GITHUB_HOST,
     SUPPORTED_UPSTREAM_STRATEGIES,
-    _LABEL_RE,
     Settings,
     UpstreamEndpoint,
     now_iso,
     parse_upstream_servers,
+)
+
+
+_DNS_OWNER_LABEL_RE = re.compile(
+    r"^[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?$"
 )
 
 
@@ -58,7 +63,7 @@ def normalize_domain(value: str | None, *, allow_single_label: bool = False) -> 
     labels = candidate.split(".")
     if not allow_single_label and len(labels) < 2:
         return None
-    if not all(_LABEL_RE.fullmatch(label) for label in labels):
+    if not all(_DNS_OWNER_LABEL_RE.fullmatch(label) for label in labels):
         return None
     return candidate
 
