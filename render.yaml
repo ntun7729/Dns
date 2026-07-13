@@ -9,6 +9,18 @@ services:
         value: "production"
       - key: PORT
         value: "10000"
+      - key: DASHBOARD_USERNAME
+        sync: false
+      - key: DASHBOARD_PASSWORD
+        sync: false
+      - key: HISTORY_MINUTES
+        value: "120"
+      - key: FILTER_ENABLED
+        value: "false"
+      - key: BLOCKLIST_PRESET
+        value: "hagezi_light"
+      - key: FILTER_UPDATE_HOURS
+        value: "24"
       - key: DOT_ENABLED
         value: "true"
       - key: DOT_BIND_HOST
