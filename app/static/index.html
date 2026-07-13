@@ -12,7 +12,7 @@
         <div>
           <p class="eyebrow">Render DNS-over-TLS operations</p>
           <h1>DNS Dashboard</h1>
-          <p class="subhead">Live certificate, resolver, DoT, and FRPC telemetry for the public Android Private DNS path.</p>
+          <p class="subhead">Private DNS health, lightweight history, local profiles, and privacy-safe filtering controls.</p>
         </div>
         <div class="hero-actions">
           <span class="updated" id="lastUpdated">Waiting for data</span>
@@ -31,9 +31,11 @@
         <article><span>FRPC tunnel</span><strong id="frpcStatus">-</strong></article>
         <article><span>Certificate</span><strong id="certificateStatus">-</strong></article>
         <article><span>DNS queries</span><strong id="queryCount">0</strong></article>
+        <article><span>Blocked</span><strong id="blockedCount">0</strong></article>
         <article><span>DNS errors</span><strong id="errorCount">0</strong></article>
         <article><span>Upstream latency</span><strong id="upstreamLatency">-</strong></article>
         <article><span>Active clients</span><strong id="activeConnections">0</strong></article>
+        <article><span>Active profile</span><strong id="activeProfileMetric">Default</strong></article>
       </section>
 
       <section class="layout">
@@ -63,6 +65,10 @@
               <div><strong>Upstream resolvers</strong><p id="upstreamDetail">Waiting for resolver telemetry.</p></div>
             </div>
             <div>
+              <span class="dot neutral" id="filterDot"></span>
+              <div><strong>Filtering</strong><p id="filterDetail">Waiting for filtering state.</p></div>
+            </div>
+            <div>
               <span class="dot neutral" id="frpcDot"></span>
               <div><strong>FRPC exposure</strong><p id="frpcDetail">Waiting for FRPC details.</p></div>
             </div>
@@ -80,11 +86,14 @@
             <div><dt>FRP authentication</dt><dd id="authMode">-</dd></div>
             <div><dt>FRPC session</dt><dd id="frpcSession">-</dd></div>
             <div><dt>Certificate expiry</dt><dd id="certificateExpiry">-</dd></div>
-            <div><dt>TLS secret format</dt><dd id="tlsSecretFormat">-</dd></div>
+            <div><dt>Active profile</dt><dd id="activeProfile">-</dd></div>
+            <div><dt>Filtering preset</dt><dd id="filterPresetStatus">-</dd></div>
+            <div><dt>Loaded block domains</dt><dd id="loadedBlockDomains">0</dd></div>
             <div><dt>Resolver strategy</dt><dd id="upstreamStrategy">-</dd></div>
             <div><dt>Configured resolvers</dt><dd id="upstreamDns">-</dd></div>
             <div><dt>Last upstream used</dt><dd id="lastUpstreamUsed">-</dd></div>
             <div><dt>Failovers</dt><dd id="upstreamFailovers">0</dd></div>
+            <div><dt>History window</dt><dd id="historyWindow">-</dd></div>
             <div><dt>Runtime logging</dt><dd id="runtimeLogging">-</dd></div>
             <div><dt>Last DNS query</dt><dd id="lastQuery">-</dd></div>
           </dl>
@@ -92,15 +101,31 @@
         </aside>
       </section>
 
+      <section class="chart-grid">
+        <article class="panel chart-panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">In-memory history</p><h2>Queries, blocked, and errors</h2></div>
+            <span class="mini-pill" id="trafficChartRange">120 min</span>
+          </div>
+          <canvas id="trafficChart" height="210" aria-label="DNS traffic history chart"></canvas>
+          <div class="chart-legend"><span class="legend-query">Queries</span><span class="legend-blocked">Blocked</span><span class="legend-error">Errors</span></div>
+        </article>
+        <article class="panel chart-panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">In-memory history</p><h2>Resolver latency</h2></div>
+            <span class="mini-pill">Average/minute</span>
+          </div>
+          <canvas id="latencyChart" height="210" aria-label="Resolver latency history chart"></canvas>
+          <div class="chart-legend"><span class="legend-latency">Latency (ms)</span></div>
+        </article>
+      </section>
+
       <section class="lower-grid">
         <article class="panel">
           <p class="eyebrow">Diagnostics</p>
           <h2>Actionable checks</h2>
-          <div class="diagnostics" id="diagnosticsList">
-            <p class="empty">Waiting for diagnostics.</p>
-          </div>
+          <div class="diagnostics" id="diagnosticsList"><p class="empty">Waiting for diagnostics.</p></div>
         </article>
-
         <article class="panel">
           <p class="eyebrow">DNS telemetry</p>
           <h2>Error breakdown</h2>
@@ -117,15 +142,47 @@
 
       <section class="panel resolver-panel">
         <div class="panel-head">
-          <div>
-            <p class="eyebrow">Upstream pool</p>
-            <h2>Resolver health</h2>
-          </div>
+          <div><p class="eyebrow">Upstream pool</p><h2>Resolver health</h2></div>
           <span class="mini-pill" id="upstreamPoolStatus">Waiting</span>
         </div>
-        <div class="resolver-grid" id="resolverGrid">
-          <p class="empty">Waiting for resolver data.</p>
+        <div class="resolver-grid" id="resolverGrid"><p class="empty">Waiting for resolver data.</p></div>
+      </section>
+
+      <section class="panel controls-panel" id="controlsPanel" hidden>
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">Local profile manager</p>
+            <h2>DNS controls</h2>
+            <p class="section-copy">NextDNS-style local profiles. Changes apply immediately but remain in memory until the service restarts. Export profiles to keep a backup.</p>
+          </div>
+          <span class="mini-pill warn">Runtime-only</span>
         </div>
+
+        <div class="profile-toolbar">
+          <label><span>Profile</span><select id="profileSelect"></select></label>
+          <button id="activateProfileButton" type="button">Activate</button>
+          <button id="newProfileButton" type="button" class="secondary">New</button>
+          <button id="duplicateProfileButton" type="button" class="secondary">Duplicate</button>
+          <button id="deleteProfileButton" type="button" class="danger">Delete</button>
+        </div>
+
+        <form id="profileForm" class="control-form">
+          <input id="profileId" type="hidden">
+          <label><span>Profile name</span><input id="profileName" maxlength="64" required></label>
+          <label class="wide"><span>Upstream resolvers</span><textarea id="profileUpstreams" rows="3" placeholder="1.1.1.1:53,9.9.9.9:53"></textarea><small>Comma-separated. Up to eight resolvers.</small></label>
+          <label><span>Resolver strategy</span><select id="profileStrategy"><option value="primary_failover">Primary failover</option><option value="round_robin">Round robin</option></select></label>
+          <label><span>Filtering preset</span><select id="profileFilterPreset"></select></label>
+          <label class="toggle-label"><input id="profileFilterEnabled" type="checkbox"><span>Enable ad and tracker filtering</span></label>
+          <label class="wide"><span>Manual blocklist</span><textarea id="profileBlocklist" rows="7" placeholder="ads.example.com"></textarea><small>One domain per line. Subdomains are included.</small></label>
+          <label class="wide"><span>Allowlist</span><textarea id="profileAllowlist" rows="7" placeholder="allowed.example.com"></textarea><small>Allowlist overrides downloaded and manual blocking.</small></label>
+          <div class="form-actions wide">
+            <button id="saveProfileButton" type="submit">Save and activate</button>
+            <button id="refreshBlocklistButton" type="button" class="secondary">Refresh blocklist</button>
+            <button id="exportProfilesButton" type="button" class="secondary">Export profiles</button>
+            <label class="file-button secondary">Import profiles<input id="importProfilesInput" type="file" accept="application/json,.json"></label>
+          </div>
+        </form>
+        <p class="control-message" id="controlMessage"></p>
       </section>
     </main>
     <script src="/app.js"></script>
