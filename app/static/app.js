@@ -50,10 +50,13 @@ function setOverall(state) {
 
 function frpcCopy(checks, settings, metrics) {
   if (!settings.frpc_enabled) return "FRPC is disabled by FRPC_ENABLED=false.";
-  if (!checks.frpc_configured) return "Set FRP_SERVER_ADDR and FRP_AUTH_TOKEN on Render to start the FRPC tunnel.";
-  if (checks.frpc === "running") return `FRPC is exposing local DoT on remote TCP port ${settings.frp_remote_port}.`;
+  if (!checks.frpc_configured) return "Set FRP_SERVER_ADDR on Render to start the FRPC tunnel.";
+  const authMode = checks.frp_auth_mode || settings.frp_auth_mode || "none";
+  if (checks.frpc === "running") {
+    return `FRPC is exposing local DoT on remote TCP port ${settings.frp_remote_port} with ${authMode} authentication.`;
+  }
   if (checks.frpc === "exited") return `FRPC started but is no longer running${metrics.frpc_exit_code === null ? "." : `; exit code ${metrics.frpc_exit_code}.`}`;
-  return "FRPC is configured but has not reported a running process yet.";
+  return `FRPC is configured with ${authMode} authentication but has not reported a running process yet.`;
 }
 
 async function refreshStatus() {
