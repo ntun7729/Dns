@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.pem
+*.key
+*.crt
+output/
+memory/
