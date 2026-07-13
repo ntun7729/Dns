@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>DNS Dashboard</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Render-ready DNS operations</p>
+          <h1>DNS Dashboard</h1>
+          <p class="subhead">Monitor the dashboard service, DNS-over-TLS listener, and FRPC exposure path from one compact control surface.</p>
+        </div>
+        <div class="status-pill" id="overallStatus">Checking</div>
+      </section>
+
+      <section class="grid metrics" aria-label="Service metrics">
+        <article>
+          <span>HTTP service</span>
+          <strong id="httpStatus">-</strong>
+        </article>
+        <article>
+          <span>DoT listener</span>
+          <strong id="dotStatus">-</strong>
+        </article>
+        <article>
+          <span>FRPC tunnel</span>
+          <strong id="frpcStatus">-</strong>
+        </article>
+        <article>
+          <span>Queries served</span>
+          <strong id="queryCount">0</strong>
+        </article>
+      </section>
+
+      <section class="layout">
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Runtime</p>
+              <h2>Service Health</h2>
+            </div>
+            <button id="refreshButton" type="button">Refresh</button>
+          </div>
+          <div class="timeline">
+            <div>
+              <span class="dot ok"></span>
+              <div>
+                <strong>Dashboard API</strong>
+                <p id="apiDetail">Waiting for status.</p>
+              </div>
+            </div>
+            <div>
+              <span class="dot warn"></span>
+              <div>
+                <strong>DNS-over-TLS</strong>
+                <p id="dotDetail">Waiting for listener details.</p>
+              </div>
+            </div>
+            <div>
+              <span class="dot neutral"></span>
+              <div>
+                <strong>FRPC exposure</strong>
+                <p id="frpcDetail">Waiting for FRPC details.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <aside class="panel config-panel">
+          <p class="eyebrow">Configuration</p>
+          <h2>Render + FRPC</h2>
+          <dl>
+            <div><dt>HTTP port</dt><dd id="httpPort">-</dd></div>
+            <div><dt>Local DoT</dt><dd id="dotPort">-</dd></div>
+            <div><dt>Remote DoT</dt><dd id="remotePort">-</dd></div>
+            <div><dt>Upstream DNS</dt><dd id="upstreamDns">-</dd></div>
+          </dl>
+          <p class="note" id="frpcError"></p>
+        </aside>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>
