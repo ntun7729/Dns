@@ -1,0 +1,145 @@
+from __future__ import annotations
+
+import os
+import socket
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+APP = Path(__file__).resolve().parents[1] / "app"
+sys.path.insert(0, str(APP))
+os.environ.setdefault("APP_ENV", "development")
+os.environ.setdefault("DOT_ENABLED", "false")
+os.environ.setdefault("FRPC_ENABLED", "false")
+
+from certificates import validate_certificate_files
+from dns_service import build_formerr_response, build_servfail_response, parse_dns_question
+from filtering import BlocklistManager
+from profiles import ProfileStore, parse_blocklist_text, validate_raw_github_url
+from settings import Settings, UpstreamEndpoint, parse_upstream_servers
+from status_api import readiness_payload, status_payload
+from telemetry import History, RuntimeState
+from web_app import build_handler
+
+
+def dns_query(name: str = "example.com", transaction_id: bytes = b"\x12\x34") -> bytes:
+    labels = b"" if name == "." else b"".join(
+        bytes([len(label)]) + label.encode("ascii") for label in name.split(".")
+    )
+    return (
+        transaction_id
+        + b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+        + labels
+        + b"\x00\x00\x01\x00\x01"
+    )
+
+
+class RefactorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.settings = Settings(
+            dot_enabled=False,
+            frpc_enabled=False,
+            upstreams=(UpstreamEndpoint("1.1.1.1", 53),),
+        )
+        self.history = History(60)
+        self.runtime = RuntimeState(self.history)
+        self.profiles = ProfileStore(self.settings)
+        self.blocklists = BlocklistManager(self.settings, self.profiles, self.runtime)
+
+    def test_upstream_parser_supports_ipv6_and_deduplication(self) -> None:
+        endpoints = parse_upstream_servers(
+            "1.1.1.1:53,1.1.1.1:53,[2606:4700:4700::1111]:53"
+        )
+        self.assertEqual([item.key for item in endpoints], [
+            "1.1.1.1:53", "[2606:4700:4700::1111]:53"
+        ])
+
+    def test_single_label_and_service_discovery_questions_are_valid(self) -> None:
+        self.assertEqual(parse_dns_question(dns_query("printer"))[0], "printer")
+        self.assertEqual(
+            parse_dns_question(dns_query("_dns._udp.example.com"))[0],
+            "_dns._udp.example.com",
+        )
+
+    def test_protocol_error_responses_preserve_transaction(self) -> None:
+        query = dns_query()
+        _, question_end = parse_dns_question(query)
+        for response, rcode in (
+            (build_formerr_response(query, question_end), 1),
+            (build_servfail_response(query, question_end), 2),
+        ):
+            self.assertEqual(response[:2], query[:2])
+            self.assertTrue(int.from_bytes(response[2:4], "big") & 0x8000)
+            self.assertEqual(int.from_bytes(response[2:4], "big") & 0xF, rcode)
+
+    def test_blocklist_parser_handles_hosts_and_inline_comments(self) -> None:
+        parsed = parse_blocklist_text(
+            "0.0.0.0 ads.example.com # comment\n||tracker.example.org^\nplain.example.net\n"
+        )
+        self.assertEqual(
+            parsed,
+            frozenset({"ads.example.com", "tracker.example.org", "plain.example.net"}),
+        )
+
+    def test_custom_blocklists_are_restricted_to_raw_github(self) -> None:
+        valid = "https://raw.githubusercontent.com/owner/repo/main/list.txt"
+        self.assertEqual(validate_raw_github_url(valid), valid)
+        for invalid in (
+            "http://raw.githubusercontent.com/owner/repo/main/list.txt",
+            "https://example.com/list.txt",
+            valid + "?download=1",
+        ):
+            with self.assertRaises(ValueError):
+                validate_raw_github_url(invalid)
+
+    def test_active_profile_snapshot_updates_without_reactivation(self) -> None:
+        active = self.profiles.active()
+        self.profiles.save({
+            "id": active.id,
+            "name": "Edited",
+            "upstream_servers": "1.1.1.1:53",
+            "upstream_strategy": "primary_failover",
+            "filter_enabled": False,
+            "filter_preset": "off",
+            "manual_block_domains": "",
+            "allow_domains": "",
+            "custom_blocklist_urls": "",
+            "activate": False,
+        })
+        self.assertEqual(self.profiles.active().name, "Edited")
+
+    def test_health_status_and_static_routes_are_safe(self) -> None:
+        self.runtime.update(dot_state="disabled", frpc_state="disabled")
+        self.assertTrue(readiness_payload(self.settings, self.runtime)["ready"])
+        payload = status_payload(
+            self.settings, self.runtime, self.profiles, self.blocklists
+        )
+        self.assertEqual(payload["checks"]["http"], "healthy")
+        handler = build_handler(
+            self.settings, self.runtime, self.profiles, self.blocklists
+        )
+        self.assertIn("/app.js", handler.static_routes)
+        self.assertNotIn("/api/status", handler.static_routes)
+
+    def test_matching_certificate_and_key_validate(self) -> None:
+        if not Path("/usr/bin/openssl").exists() and not Path("/bin/openssl").exists():
+            self.skipTest("OpenSSL is unavailable")
+        import subprocess
+        with tempfile.TemporaryDirectory() as directory:
+            cert = Path(directory) / "cert.pem"
+            key = Path(directory) / "key.pem"
+            subprocess.run([
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-days", "1", "-subj", "/CN=dns.example.com",
+                "-addext", "subjectAltName=DNS:dns.example.com",
+                "-keyout", str(key), "-out", str(cert),
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            result = validate_certificate_files(
+                cert, key, "dns.example.com", source="test"
+            )
+            self.assertTrue(result.valid, result.error)
+
+
+if __name__ == "__main__":
+    unittest.main()
