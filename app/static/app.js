@@ -6,11 +6,12 @@ const fields = Object.fromEntries(
     "activeConnections", "apiDetail", "certificateDetail", "dotDetail",
     "upstreamDetail", "frpcDetail", "publicHostname", "publicDot", "localDot",
     "frpsControl", "authMode", "frpcSession", "certificateExpiry",
-    "tlsSecretFormat", "upstreamDns", "lastUpstreamSuccess", "lastQuery",
-    "serviceError", "frpcLog", "refreshButton", "apiDot", "certificateDot",
-    "dotDot", "upstreamDot", "frpcDot", "diagnosticsList", "timeoutErrors",
-    "socketErrors", "malformedErrors", "internalErrors", "clientDisconnects",
-    "peakConnections",
+    "tlsSecretFormat", "upstreamStrategy", "upstreamDns", "lastUpstreamUsed",
+    "upstreamFailovers", "runtimeLogging", "lastQuery", "serviceError",
+    "refreshButton", "apiDot", "certificateDot", "dotDot", "upstreamDot",
+    "frpcDot", "diagnosticsList", "timeoutErrors", "socketErrors",
+    "malformedErrors", "internalErrors", "clientDisconnects", "peakConnections",
+    "resolverGrid", "upstreamPoolStatus",
   ].map((id) => [id, document.querySelector(`#${id}`)])
 );
 
@@ -104,6 +105,50 @@ function renderDiagnostics(items) {
   }
 }
 
+function renderResolvers(items, overallState) {
+  fields.resolverGrid.replaceChildren();
+  for (const resolver of items || []) {
+    const card = document.createElement("article");
+    card.className = `resolver-card ${resolver.state || "unknown"}`;
+
+    const head = document.createElement("div");
+    head.className = "resolver-head";
+    const endpoint = document.createElement("strong");
+    endpoint.textContent = resolver.endpoint;
+    const state = document.createElement("span");
+    state.className = `resolver-state ${resolver.state || "unknown"}`;
+    state.textContent = titleCase(resolver.state);
+    head.append(endpoint, state);
+
+    const stats = document.createElement("dl");
+    stats.className = "resolver-stats";
+    const rows = [
+      ["Latest", formatLatency(resolver.last_latency_ms)],
+      ["Average", formatLatency(resolver.average_latency_ms)],
+      ["Successes", resolver.successes],
+      ["Failures", resolver.failures],
+      ["Timeouts", resolver.timeouts],
+      ["Last success", resolver.last_success_at ? formatDate(resolver.last_success_at) : "No success yet"],
+    ];
+    for (const [label, value] of rows) {
+      const row = document.createElement("div");
+      const term = document.createElement("dt");
+      term.textContent = label;
+      const detail = document.createElement("dd");
+      detail.textContent = String(value);
+      row.append(term, detail);
+      stats.append(row);
+    }
+
+    card.append(head, stats);
+    fields.resolverGrid.append(card);
+  }
+
+  const state = overallState || "unknown";
+  fields.upstreamPoolStatus.className = `mini-pill ${state}`;
+  fields.upstreamPoolStatus.textContent = titleCase(state);
+}
+
 async function refreshStatus() {
   fields.refreshButton.disabled = true;
   try {
@@ -114,6 +159,7 @@ async function refreshStatus() {
     const metrics = data.metrics;
     const endpoints = data.endpoints;
     const errorTypes = metrics.dns_error_types || {};
+    const upstreams = metrics.upstreams || [];
 
     fields.httpStatus.textContent = titleCase(data.checks.http);
     fields.dotStatus.textContent = titleCase(data.checks.dot_listener);
@@ -125,10 +171,10 @@ async function refreshStatus() {
     fields.activeConnections.textContent = metrics.active_connections ?? 0;
     fields.apiDetail.textContent = `Healthy for ${formatUptime(data.uptime_seconds)} on ${endpoints.http}.`;
     fields.certificateDetail.textContent = certificateCopy(certificate, data.public_dns_hostname || "the configured hostname");
-    fields.dotDetail.textContent = `Listener: ${endpoints.dot_local}; upstream: ${endpoints.upstream_resolver}.`;
+    fields.dotDetail.textContent = `Listener: ${endpoints.dot_local}; upstream pool: ${upstreams.length} resolvers.`;
     fields.upstreamDetail.textContent = metrics.upstream_last_latency_ms === null
-      ? `No successful resolver samples yet for ${endpoints.upstream_resolver}.`
-      : `Latest ${formatLatency(metrics.upstream_last_latency_ms)}; average ${formatLatency(metrics.upstream_average_latency_ms)} across ${metrics.upstream_samples} samples.`;
+      ? `No successful resolver samples yet. Strategy: ${titleCase(data.configuration.upstream_strategy)}.`
+      : `Latest ${formatLatency(metrics.upstream_last_latency_ms)} via ${metrics.upstream_last_used}; average ${formatLatency(metrics.upstream_average_latency_ms)}; ${metrics.upstream_failovers} failovers.`;
     fields.frpcDetail.textContent = frpcCopy(data);
     fields.publicHostname.textContent = data.public_dns_hostname || "Not configured";
     fields.publicDot.textContent = endpoints.dot_public || "Not configured";
@@ -138,11 +184,13 @@ async function refreshStatus() {
     fields.frpcSession.textContent = data.frpc.session_seconds === null ? "Not running" : formatUptime(data.frpc.session_seconds);
     fields.certificateExpiry.textContent = formatDate(certificate.expires_at);
     fields.tlsSecretFormat.textContent = titleCase(data.configuration.tls_secret_format || "unknown");
-    fields.upstreamDns.textContent = endpoints.upstream_resolver;
-    fields.lastUpstreamSuccess.textContent = metrics.upstream_last_success_at ? formatDate(metrics.upstream_last_success_at) : "No successful query yet";
+    fields.upstreamStrategy.textContent = titleCase(data.configuration.upstream_strategy || "unknown");
+    fields.upstreamDns.textContent = (data.configuration.upstream_servers || []).join(", ") || "Not configured";
+    fields.lastUpstreamUsed.textContent = metrics.upstream_last_used || "No successful query yet";
+    fields.upstreamFailovers.textContent = metrics.upstream_failovers || 0;
+    fields.runtimeLogging.textContent = titleCase(data.configuration.runtime_logging || "unknown");
     fields.lastQuery.textContent = metrics.last_query_at ? formatDate(metrics.last_query_at) : "No queries yet";
     fields.serviceError.textContent = certificate.error || data.frpc.last_error || "";
-    fields.frpcLog.textContent = data.frpc.last_log ? `Last FRPC log: ${data.frpc.last_log}` : "";
     fields.timeoutErrors.textContent = errorTypes.upstream_timeout || 0;
     fields.socketErrors.textContent = errorTypes.upstream_socket || 0;
     fields.malformedErrors.textContent = errorTypes.malformed_message || 0;
@@ -153,11 +201,12 @@ async function refreshStatus() {
 
     showCertificateWarning(certificate);
     renderDiagnostics(data.diagnostics);
+    renderResolvers(upstreams, data.checks.upstream);
 
     setDot(fields.apiDot, "ok");
     setDot(fields.certificateDot, certificate.valid ? (certificate.warning?.renewal_recommended ? "warn" : "ok") : "bad");
     setDot(fields.dotDot, ["running", "disabled"].includes(data.checks.dot_listener) ? "ok" : "bad");
-    setDot(fields.upstreamDot, metrics.upstream_last_failure_at && (!metrics.upstream_last_success_at || metrics.upstream_last_failure_at > metrics.upstream_last_success_at) ? "warn" : "ok");
+    setDot(fields.upstreamDot, data.checks.upstream === "healthy" ? "ok" : data.checks.upstream === "unknown" ? "warn" : "bad");
     setDot(fields.frpcDot, ["running", "disabled"].includes(data.checks.frpc) ? "ok" : ["starting", "not-started"].includes(data.checks.frpc) ? "warn" : "bad");
 
     const warning = certificate.warning?.renewal_recommended || (data.diagnostics || []).some((item) => item.severity === "warning");
@@ -176,4 +225,4 @@ async function refreshStatus() {
 
 fields.refreshButton.addEventListener("click", refreshStatus);
 refreshStatus();
-setInterval(refreshStatus, 10000);
+setInterval(refreshStatus, 15000);
