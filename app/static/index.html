@@ -10,30 +10,20 @@
     <main class="shell">
       <section class="hero">
         <div>
-          <p class="eyebrow">Render-ready DNS operations</p>
+          <p class="eyebrow">Render DNS-over-TLS operations</p>
           <h1>DNS Dashboard</h1>
-          <p class="subhead">Operational visibility for the HTTP control surface, local DNS-over-TLS listener, and FRPC exposure path on TCP 853.</p>
+          <p class="subhead">Status for the trusted TLS certificate, local DoT listener, FRPC tunnel, public Android Private DNS hostname, and upstream resolver.</p>
         </div>
         <div class="status-pill" id="overallStatus">Checking</div>
       </section>
 
       <section class="grid metrics" aria-label="Service metrics">
-        <article>
-          <span>HTTP service</span>
-          <strong id="httpStatus">-</strong>
-        </article>
-        <article>
-          <span>DoT listener</span>
-          <strong id="dotStatus">-</strong>
-        </article>
-        <article>
-          <span>FRPC tunnel</span>
-          <strong id="frpcStatus">-</strong>
-        </article>
-        <article>
-          <span>Queries served</span>
-          <strong id="queryCount">0</strong>
-        </article>
+        <article><span>HTTP service</span><strong id="httpStatus">-</strong></article>
+        <article><span>DoT listener</span><strong id="dotStatus">-</strong></article>
+        <article><span>FRPC tunnel</span><strong id="frpcStatus">-</strong></article>
+        <article><span>Certificate</span><strong id="certificateStatus">-</strong></article>
+        <article><span>DNS queries</span><strong id="queryCount">0</strong></article>
+        <article><span>DNS errors</span><strong id="errorCount">0</strong></article>
       </section>
 
       <section class="layout">
@@ -41,46 +31,44 @@
           <div class="panel-head">
             <div>
               <p class="eyebrow">Runtime</p>
-              <h2>Service Health</h2>
+              <h2>Service health</h2>
             </div>
             <button id="refreshButton" type="button">Refresh</button>
           </div>
           <div class="timeline">
             <div>
               <span class="dot ok" id="apiDot"></span>
-              <div>
-                <strong>Dashboard API</strong>
-                <p id="apiDetail">Waiting for status.</p>
-              </div>
+              <div><strong>Dashboard API</strong><p id="apiDetail">Waiting for status.</p></div>
+            </div>
+            <div>
+              <span class="dot neutral" id="certificateDot"></span>
+              <div><strong>TLS certificate</strong><p id="certificateDetail">Waiting for certificate validation.</p></div>
             </div>
             <div>
               <span class="dot neutral" id="dotDot"></span>
-              <div>
-                <strong>DNS-over-TLS</strong>
-                <p id="dotDetail">Waiting for listener details.</p>
-              </div>
+              <div><strong>DNS-over-TLS</strong><p id="dotDetail">Waiting for listener details.</p></div>
             </div>
             <div>
               <span class="dot neutral" id="frpcDot"></span>
-              <div>
-                <strong>FRPC exposure</strong>
-                <p id="frpcDetail">Waiting for FRPC details.</p>
-              </div>
+              <div><strong>FRPC exposure</strong><p id="frpcDetail">Waiting for FRPC details.</p></div>
             </div>
           </div>
         </div>
 
         <aside class="panel config-panel">
           <p class="eyebrow">Configuration</p>
-          <h2>Render + FRPC</h2>
+          <h2>Public DNS path</h2>
           <dl>
-            <div><dt>HTTP endpoint</dt><dd id="httpPort">-</dd></div>
-            <div><dt>Local DoT</dt><dd id="dotPort">-</dd></div>
-            <div><dt>Remote DoT</dt><dd id="remotePort">-</dd></div>
-            <div><dt>Upstream DNS</dt><dd id="upstreamDns">-</dd></div>
-            <div><dt>Last query</dt><dd id="lastQuery">-</dd></div>
+            <div><dt>Private DNS hostname</dt><dd id="publicHostname">-</dd></div>
+            <div><dt>Public DoT</dt><dd id="publicDot">-</dd></div>
+            <div><dt>Local DoT</dt><dd id="localDot">-</dd></div>
+            <div><dt>FRPS control</dt><dd id="frpsControl">-</dd></div>
+            <div><dt>FRP authentication</dt><dd id="authMode">-</dd></div>
+            <div><dt>Certificate expiry</dt><dd id="certificateExpiry">-</dd></div>
+            <div><dt>Upstream resolver</dt><dd id="upstreamDns">-</dd></div>
+            <div><dt>Last DNS query</dt><dd id="lastQuery">-</dd></div>
           </dl>
-          <p class="note" id="frpcError"></p>
+          <p class="note" id="serviceError"></p>
           <p class="note subtle" id="frpcLog"></p>
         </aside>
       </section>
