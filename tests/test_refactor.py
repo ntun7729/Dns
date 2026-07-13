@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 APP = Path(__file__).resolve().parents[1] / "app"
 sys.path.insert(0, str(APP))
@@ -16,6 +17,7 @@ os.environ.setdefault("FRPC_ENABLED", "false")
 from certificates import validate_certificate_files
 from dns_service import build_formerr_response, build_servfail_response, parse_dns_question
 from filtering import BlocklistManager
+from frpc_service import frpc_child_environment
 from profiles import ProfileStore, parse_blocklist_text, validate_raw_github_url
 from settings import Settings, UpstreamEndpoint, parse_upstream_servers
 from status_api import readiness_payload, status_payload
@@ -61,6 +63,52 @@ class RefactorTests(unittest.TestCase):
             parse_dns_question(dns_query("_dns._udp.example.com"))[0],
             "_dns._udp.example.com",
         )
+
+    def test_manual_rules_accept_service_discovery_domains(self) -> None:
+        active = self.profiles.active()
+        self.profiles.save({
+            "id": active.id,
+            "name": active.name,
+            "upstream_servers": "1.1.1.1:53",
+            "upstream_strategy": "primary_failover",
+            "filter_enabled": True,
+            "filter_preset": "off",
+            "manual_block_domains": "_dns._udp.example.com",
+            "allow_domains": "_sip._tcp.example.com",
+            "custom_blocklist_urls": "",
+            "activate": False,
+        })
+        updated = self.profiles.active()
+        self.assertIn("_dns._udp.example.com", updated.manual_block)
+        self.assertIn("_sip._tcp.example.com", updated.allow)
+
+    def test_frpc_child_environment_excludes_application_secrets(self) -> None:
+        sensitive = {
+            "DOT_CERT_PEM": "certificate-secret",
+            "DOT_KEY_PEM": "private-key-secret",
+            "DOT_CERT_B64": "certificate-base64-secret",
+            "DOT_KEY_B64": "private-key-base64-secret",
+            "DASHBOARD_USERNAME": "dashboard-user",
+            "DASHBOARD_PASSWORD": "dashboard-password-secret",
+            "FRP_AUTH_TOKEN": "frp-token-secret",
+            "PATH": "/tmp/untrusted-path",
+            "SSL_CERT_FILE": "/tmp/untrusted-ca-file",
+        }
+        with mock.patch.dict(os.environ, sensitive, clear=True):
+            child_env = frpc_child_environment()
+        self.assertEqual(
+            child_env,
+            {
+                "PATH": "/usr/local/bin:/usr/bin:/bin",
+                "HOME": "/tmp",
+                "TMPDIR": "/tmp",
+                "SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt",
+                "SSL_CERT_DIR": "/etc/ssl/certs",
+            },
+        )
+        for variable, value in sensitive.items():
+            self.assertNotIn(variable, child_env)
+            self.assertNotIn(value, child_env.values())
 
     def test_protocol_error_responses_preserve_transaction(self) -> None:
         query = dns_query()
