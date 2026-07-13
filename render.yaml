@@ -17,9 +17,9 @@ services:
         value: "8853"
       - key: DOT_PUBLIC_HOSTNAME
         value: "dns.nyan.college"
-      - key: DOT_CERT_PEM
+      - key: DOT_CERT_B64
         sync: false
-      - key: DOT_KEY_PEM
+      - key: DOT_KEY_B64
         sync: false
       - key: FRPC_ENABLED
         value: "true"
