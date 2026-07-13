@@ -121,9 +121,13 @@ class ManagedDashboardTests(unittest.TestCase):
         self.assertNotIn("domain", last)
         self.assertNotIn("client", last)
 
-    def test_status_payload_exposes_profiles_without_domain_names(self):
+    def test_status_payload_exposes_counts_without_domain_values(self):
         core = self.core
         managed = self.managed
+        with managed.PROFILE_LOCK:
+            profile = managed.PROFILES[managed.ACTIVE_PROFILE_ID]
+            profile["manual_block"] = {"secret-block.test"}
+            profile["allow"] = {"secret-allow.test"}
         core.set_runtime(
             dot_state="running",
             frpc_state="running",
@@ -151,9 +155,11 @@ class ManagedDashboardTests(unittest.TestCase):
         payload = managed.status_payload(settings)
         self.assertEqual(payload["profile"]["name"], "Default")
         self.assertIn("history", payload)
+        self.assertEqual(payload["filtering"]["manual_block_domains"], 1)
+        self.assertEqual(payload["filtering"]["allow_domains"], 1)
         encoded = str(payload)
-        self.assertNotIn("manual_block_domains", encoded)
-        self.assertNotIn("allow_domains", encoded)
+        self.assertNotIn("secret-block.test", encoded)
+        self.assertNotIn("secret-allow.test", encoded)
 
 
 if __name__ == "__main__":
