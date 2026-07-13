@@ -20,35 +20,9 @@ RUN set -eux; \
     archive="frp_${FRP_VERSION}_linux_${frp_arch}.tar.gz"; \
     release="https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}"; \
     curl -fsSL "$release/$archive" -o "/tmp/$archive"; \
-    FRP_ARCHIVE="$archive" FRP_VERSION="$FRP_VERSION" python - <<'PY'
-import hashlib
-import json
-import os
-import urllib.request
-
-archive = os.environ["FRP_ARCHIVE"]
-version = os.environ["FRP_VERSION"]
-request = urllib.request.Request(
-    f"https://api.github.com/repos/fatedier/frp/releases/tags/v{version}",
-    headers={"Accept": "application/vnd.github+json", "User-Agent": "dns-dashboard-build"},
-)
-with urllib.request.urlopen(request, timeout=30) as response:
-    release = json.load(response)
-asset = next((item for item in release.get("assets", []) if item.get("name") == archive), None)
-if not asset:
-    raise SystemExit(f"FRP release asset was not found: {archive}")
-digest = str(asset.get("digest") or "")
-if not digest.startswith("sha256:"):
-    raise SystemExit("GitHub did not provide a SHA-256 digest for the FRP release asset.")
-actual = hashlib.sha256(open(f"/tmp/{archive}", "rb").read()).hexdigest()
-expected = digest.removeprefix("sha256:")
-if actual != expected:
-    raise SystemExit(f"FRP archive checksum mismatch: expected {expected}, got {actual}")
-PY
-RUN set -eux; \
-    arch="${TARGETARCH:-amd64}"; \
-    case "$arch" in amd64) frp_arch="amd64" ;; arm64) frp_arch="arm64" ;; esac; \
-    archive="frp_${FRP_VERSION}_linux_${frp_arch}.tar.gz"; \
+    digest="$(FRP_ARCHIVE="$archive" FRP_VERSION="$FRP_VERSION" python -c 'import json, os, urllib.request; name=os.environ["FRP_ARCHIVE"]; version=os.environ["FRP_VERSION"]; request=urllib.request.Request(f"https://api.github.com/repos/fatedier/frp/releases/tags/v{version}", headers={"Accept":"application/vnd.github+json","User-Agent":"dns-dashboard-build"}); release=json.load(urllib.request.urlopen(request, timeout=30)); asset=next((item for item in release.get("assets",[]) if item.get("name")==name), None); value=str((asset or {}).get("digest") or ""); print(value)')"; \
+    case "$digest" in sha256:*) expected="${digest#sha256:}" ;; *) echo "GitHub did not provide the FRP asset SHA-256 digest." >&2; exit 1 ;; esac; \
+    echo "$expected  /tmp/$archive" | sha256sum -c -; \
     tar -xzf "/tmp/$archive" -C /tmp; \
     install -m 0755 "/tmp/frp_${FRP_VERSION}_linux_${frp_arch}/frpc" /usr/local/bin/frpc; \
     rm -rf /tmp/frp*
