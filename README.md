@@ -1,71 +1,84 @@
 # DNS Dashboard
 
-A Render-ready DNS dashboard that runs a compact operations UI, a local DNS-over-TLS listener, and optional FRPC exposure for public TCP port `853`.
+A Render-ready DNS dashboard that runs an operations UI, a local DNS-over-TLS listener, and FRPC exposure for public TCP port `853`.
 
 ## What ships
 
-- Premium dark operations dashboard at `/`
-- JSON health and status APIs at `/healthz`, `/readyz`, and `/api/status`
+- Dashboard at `/`
+- JSON endpoints at `/healthz`, `/readyz`, and `/api/status`
 - Local DNS-over-TLS listener on `127.0.0.1:8853`
 - UDP forwarding to an upstream resolver, defaulting to `1.1.1.1:53`
-- FRPC configuration generation that exposes local DoT through a remote FRP server on port `853`
-- Runtime status that distinguishes missing FRPC config, running tunnels, and exited FRPC processes
+- FRPC configuration generation for public TCP port `853`
+- Tokenless FRPC support, with optional token authentication
 - Render Docker deployment config in `render.yaml`
-- GitHub Actions workflow that builds and publishes the container to GHCR
+- GHCR publishing to `ghcr.io/ntun7729/dns`
 
-## Render deployment
+## Render environment variables
 
-Render web services expose a single HTTP port to the public internet. This service binds the dashboard to `PORT`, defaulting to `10000`, and uses FRPC to expose DNS-over-TLS through your own FRP server.
-
-Required Render environment variables:
+Required for FRPC:
 
 | Variable | Purpose |
 | --- | --- |
-| `FRP_SERVER_ADDR` | Hostname or IP address of your FRP server |
-| `FRP_SERVER_PORT` | FRP control port, usually `7000` |
-| `FRP_AUTH_TOKEN` | Shared FRP token stored as a Render secret |
-| `FRP_REMOTE_PORT` | Public TCP port on the FRP server, default `853` |
+| `FRP_SERVER_ADDR` | Public IP address or hostname of the FRPS server |
+| `FRP_SERVER_PORT` | FRPS control port; default `7000` |
+| `FRP_REMOTE_PORT` | Public DoT port on FRPS; default `853` |
 
-Optional TLS variables:
+Optional:
 
 | Variable | Purpose |
 | --- | --- |
-| `DOT_CERT_FILE` | Path to a TLS certificate inside the container |
-| `DOT_KEY_FILE` | Path to the matching private key |
+| `FRP_AUTH_TOKEN` | FRPS shared token. Leave unset when FRPS has no token authentication. |
+| `UPSTREAM_DNS` | Upstream DNS resolver; default `1.1.1.1` |
+| `UPSTREAM_DNS_PORT` | Upstream DNS port; default `53` |
+| `DOT_CERT_FILE` | Path to the DoT certificate inside the container |
+| `DOT_KEY_FILE` | Path to its matching private key |
 
-If no certificate files are present, the app creates a short-lived self-signed certificate so the listener can start. Use real certificate material for production clients.
+When `FRP_AUTH_TOKEN` is empty or absent, the generated FRPC configuration contains no `auth.method` or `auth.token` lines. When it is supplied, FRPC uses token authentication.
 
-## GHCR publishing
-
-The workflow in `.github/workflows/ghcr.yml` builds `linux/amd64` images and publishes them to:
+For your current tokenless FRPS setup, configure Render with:
 
 ```text
-ghcr.io/ntun7729/dns
+FRP_SERVER_ADDR=<FRPS public IP>
+FRP_SERVER_PORT=7000
+FRP_REMOTE_PORT=853
+FRPC_ENABLED=true
 ```
 
-Repository Actions must have package write permission enabled. The Dockerfile includes the `org.opencontainers.image.source` label recommended for GHCR package association.
+Do not create `FRP_AUTH_TOKEN` in Render unless you later enable the same token on FRPS.
 
-## Local run
+## FRPS tokenless example
+
+```toml
+bindAddr = "0.0.0.0"
+bindPort = 7000
+
+allowPorts = [
+  { single = 853 }
+]
+```
+
+Do not put `auth.method` or `auth.token` in the FRPS configuration for tokenless operation. Restart FRPS after editing it.
+
+## Cloudflare record
+
+```text
+Type: A
+Name: dns
+Content: <FRPS public IP>
+Proxy status: DNS only / gray cloud
+```
+
+Android Private DNS hostname:
+
+```text
+dns.nyan.college
+```
+
+## Local verification
 
 ```bash
-docker build -t dns-dashboard .
-docker run --rm -p 10000:10000 --env-file .env.example dns-dashboard
+python -m unittest discover -s tests -v
+python -m py_compile app/main.py
 ```
 
-Open `http://localhost:10000`.
-
-For a quick Python-only development run:
-
-```bash
-PORT=10000 FRPC_ENABLED=false python app/main.py
-```
-
-## FRPC behavior
-
-When `FRPC_ENABLED=true`, the container starts `frpc` only if both `FRP_SERVER_ADDR` and `FRP_AUTH_TOKEN` are set. It generates a runtime TOML config equivalent to `config/frpc.example.toml`:
-
-- `localIP = "127.0.0.1"`
-- `localPort = 8853`
-- `remotePort = 853`
-
-Your FRP server must allow binding TCP `853`, and any cloud firewall in front of it must allow inbound TCP `853`.
+The public status response reports `frp_auth_mode` as either `none` or `token` and never exposes the token value.
