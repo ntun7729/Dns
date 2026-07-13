@@ -27,22 +27,10 @@ class EnhancedTelemetryTests(unittest.TestCase):
         self.assertIn("upstream_stats", snapshot)
 
     def test_error_classification(self):
-        self.assertEqual(
-            enhanced.classify_dns_error(socket.timeout("timeout")),
-            "upstream_timeout",
-        )
-        self.assertEqual(
-            enhanced.classify_dns_error(OSError("network")),
-            "upstream_socket",
-        )
-        self.assertEqual(
-            enhanced.classify_dns_error(ValueError("bad length")),
-            "malformed_message",
-        )
-        self.assertEqual(
-            enhanced.classify_dns_error(RuntimeError("unexpected")),
-            "internal_error",
-        )
+        self.assertEqual(enhanced.classify_dns_error(socket.timeout("timeout")), "upstream_timeout")
+        self.assertEqual(enhanced.classify_dns_error(OSError("network")), "upstream_socket")
+        self.assertEqual(enhanced.classify_dns_error(ValueError("bad length")), "malformed_message")
+        self.assertEqual(enhanced.classify_dns_error(RuntimeError("unexpected")), "internal_error")
 
     def test_parse_upstream_servers_supports_ports_ipv6_and_deduplication(self):
         endpoints = enhanced.parse_upstream_servers(
@@ -68,13 +56,15 @@ class EnhancedTelemetryTests(unittest.TestCase):
                 raise socket.timeout("primary timeout")
             return b"\x12\x34" + b"\x00" * 10
 
-        with patch.object(enhanced, "_send_udp_query", side_effect=fake_send):
-            response = enhanced.query_upstreams_sync(
-                b"\x12\x34" + b"\x00" * 10,
-                upstreams=upstreams,
-                strategy="primary_failover",
-                timeout=0.1,
-            )
+        with patch.object(enhanced, "UPSTREAMS", upstreams):
+            enhanced.reset_runtime()
+            with patch.object(enhanced, "_send_udp_query", side_effect=fake_send):
+                response = enhanced.query_upstreams_sync(
+                    b"\x12\x34" + b"\x00" * 10,
+                    upstreams=upstreams,
+                    strategy="primary_failover",
+                    timeout=0.1,
+                )
 
         self.assertEqual(response[:2], b"\x12\x34")
         self.assertEqual(calls, ["1.1.1.1:53", "9.9.9.9:53"])
@@ -82,22 +72,10 @@ class EnhancedTelemetryTests(unittest.TestCase):
         self.assertEqual(core.RUNTIME["upstream_last_used"], "9.9.9.9:53")
 
     def test_certificate_warning_levels(self):
-        self.assertEqual(
-            enhanced.certificate_warning({"valid": True, "days_remaining": 89})["level"],
-            "green",
-        )
-        self.assertEqual(
-            enhanced.certificate_warning({"valid": True, "days_remaining": 20})["level"],
-            "yellow",
-        )
-        self.assertEqual(
-            enhanced.certificate_warning({"valid": True, "days_remaining": 7})["level"],
-            "red",
-        )
-        self.assertEqual(
-            enhanced.certificate_warning({"valid": False, "error": "invalid"})["level"],
-            "critical",
-        )
+        self.assertEqual(enhanced.certificate_warning({"valid": True, "days_remaining": 89})["level"], "green")
+        self.assertEqual(enhanced.certificate_warning({"valid": True, "days_remaining": 20})["level"], "yellow")
+        self.assertEqual(enhanced.certificate_warning({"valid": True, "days_remaining": 7})["level"], "red")
+        self.assertEqual(enhanced.certificate_warning({"valid": False, "error": "invalid"})["level"], "critical")
 
     def test_status_payload_has_no_log_and_reports_upstream_pool(self):
         endpoint = enhanced.UPSTREAMS[0]
