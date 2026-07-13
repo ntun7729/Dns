@@ -4,10 +4,9 @@
 from __future__ import annotations
 
 import signal
-import subprocess
-import threading
 from typing import Any
 
+from certificates import validate_certificate_files
 from dns_service import (
     build_formerr_response,
     build_nxdomain_response,
@@ -18,19 +17,9 @@ from dns_service import (
 )
 from filtering import BlocklistManager
 import frpc_service
-from runtime_config import (
-    Settings,
-    UpstreamEndpoint,
-    parse_upstream_servers,
-    validate_certificate_files,
-)
-from runtime_state import (
-    History,
-    ProfileStore,
-    RuntimeState,
-    parse_blocklist_text,
-    validate_raw_github_url,
-)
+from profiles import ProfileStore, parse_blocklist_text, validate_raw_github_url
+from settings import Settings, UpstreamEndpoint, parse_upstream_servers
+from telemetry import History, RuntimeState
 from web_app import build_handler, run_http
 
 SETTINGS = Settings.from_env()
@@ -43,6 +32,7 @@ DashboardHandler = build_handler(SETTINGS, RUNTIME, PROFILES, BLOCKLISTS)
 
 
 def start_frpc(settings: Settings):
+    """Compatibility wrapper used by tests and local tooling."""
     return frpc_service.start_frpc(settings, RUNTIME)
 
 
