@@ -69,19 +69,25 @@ class Settings:
     upstream_dns: str = os.getenv("UPSTREAM_DNS", "1.1.1.1")
     upstream_dns_port: int = env_int("UPSTREAM_DNS_PORT", 53)
     frpc_enabled: bool = env_bool("FRPC_ENABLED", True)
-    frp_server_addr: str = os.getenv("FRP_SERVER_ADDR", "")
+    frp_server_addr: str = os.getenv("FRP_SERVER_ADDR", "").strip()
     frp_server_port: int = env_int("FRP_SERVER_PORT", 7000)
-    frp_auth_token: str = os.getenv("FRP_AUTH_TOKEN", "")
+    frp_auth_token: str = os.getenv("FRP_AUTH_TOKEN", "").strip()
     frp_remote_port: int = env_int("FRP_REMOTE_PORT", 853)
     frpc_binary: str = os.getenv("FRPC_BINARY", "/usr/local/bin/frpc")
 
     @property
     def frpc_configured(self) -> bool:
-        return bool(self.frp_server_addr and self.frp_auth_token)
+        """FRPC only requires a server address; token authentication is optional."""
+        return bool(self.frp_server_addr)
+
+    @property
+    def frp_auth_mode(self) -> str:
+        return "token" if self.frp_auth_token else "none"
 
     def public_config(self) -> dict[str, Any]:
         data = asdict(self)
-        data["frp_auth_token"] = "***configured***" if self.frp_auth_token else ""
+        data.pop("frp_auth_token", None)
+        data["frp_auth_mode"] = self.frp_auth_mode
         return data
 
 
@@ -117,6 +123,7 @@ def ensure_self_signed_certificate(settings: Settings) -> None:
         str(cert),
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    key.chmod(0o600)
 
 
 def toml_string(value: str) -> str:
@@ -124,19 +131,31 @@ def toml_string(value: str) -> str:
 
 
 def frpc_config(settings: Settings) -> str:
-    return f"""serverAddr = {toml_string(settings.frp_server_addr)}
-serverPort = {settings.frp_server_port}
-
-auth.method = "token"
-auth.token = {toml_string(settings.frp_auth_token)}
-
-[[proxies]]
-name = "dns-over-tls"
-type = "tcp"
-localIP = {toml_string(settings.dot_bind_host)}
-localPort = {settings.dot_port}
-remotePort = {settings.frp_remote_port}
-"""
+    lines = [
+        f"serverAddr = {toml_string(settings.frp_server_addr)}",
+        f"serverPort = {settings.frp_server_port}",
+        "",
+    ]
+    if settings.frp_auth_token:
+        lines.extend(
+            [
+                'auth.method = "token"',
+                f"auth.token = {toml_string(settings.frp_auth_token)}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "[[proxies]]",
+            'name = "dns-over-tls"',
+            'type = "tcp"',
+            f"localIP = {toml_string(settings.dot_bind_host)}",
+            f"localPort = {settings.dot_port}",
+            f"remotePort = {settings.frp_remote_port}",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def write_frpc_config(settings: Settings) -> Path | None:
@@ -159,7 +178,7 @@ def start_frpc(settings: Settings) -> subprocess.Popen[str] | None:
         set_metric(frpc_last_error="FRPC is disabled by FRPC_ENABLED=false.")
         return None
     if not settings.frpc_configured:
-        set_metric(frpc_last_error="FRP_SERVER_ADDR and FRP_AUTH_TOKEN are required to start FRPC.")
+        set_metric(frpc_last_error="FRP_SERVER_ADDR is required to start FRPC.")
         return None
 
     config = write_frpc_config(settings)
@@ -229,7 +248,7 @@ async def handle_dot(reader: asyncio.StreamReader, writer: asyncio.StreamWriter)
                 METRICS["last_query_at"] = now_iso()
     except (asyncio.IncompleteReadError, ConnectionError, ssl.SSLError):
         pass
-    except Exception as exc:  # noqa: BLE001 - operational metric for malformed client traffic.
+    except Exception as exc:  # noqa: BLE001
         with METRICS_LOCK:
             METRICS["dot_errors"] += 1
         print(f"[dot] {exc}", flush=True)
@@ -266,7 +285,7 @@ def start_dot_thread(settings: Settings) -> threading.Event:
     def runner() -> None:
         try:
             asyncio.run(run_dot_server(settings, ready))
-        except Exception as exc:  # noqa: BLE001 - readiness should surface startup failures.
+        except Exception as exc:  # noqa: BLE001
             print(f"[dot] failed to start: {exc}", flush=True)
             ready.set()
 
@@ -275,9 +294,9 @@ def start_dot_thread(settings: Settings) -> threading.Event:
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    server_version = "DnsDashboard/1.1"
+    server_version = "DnsDashboard/1.2"
 
-    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API.
+    def do_GET(self) -> None:  # noqa: N802
         if self.path == "/":
             self._serve_static("index.html", "text/html; charset=utf-8")
         elif self.path == "/app.js":
@@ -334,6 +353,7 @@ def readiness_payload() -> dict[str, Any]:
         "dot_ready": dot_ready(),
         "frpc_enabled": SETTINGS.frpc_enabled,
         "frpc_configured": SETTINGS.frpc_configured,
+        "frp_auth_mode": SETTINGS.frp_auth_mode,
     }
 
 
@@ -372,6 +392,7 @@ def status_payload() -> dict[str, Any]:
             "dot": dot_state,
             "frpc": frpc_state(metrics),
             "frpc_configured": SETTINGS.frpc_configured,
+            "frp_auth_mode": SETTINGS.frp_auth_mode,
         },
         "metrics": metrics,
     }
