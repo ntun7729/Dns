@@ -29,7 +29,9 @@ services:
         value: "7000"
       - key: FRP_REMOTE_PORT
         value: "853"
-      - key: UPSTREAM_DNS
-        value: "1.1.1.1"
-      - key: UPSTREAM_DNS_PORT
-        value: "53"
+      - key: UPSTREAM_DNS_SERVERS
+        value: "1.1.1.1:53,9.9.9.9:53,8.8.8.8:53"
+      - key: UPSTREAM_STRATEGY
+        value: "primary_failover"
+      - key: UPSTREAM_TIMEOUT_SECONDS
+        value: "2.0"
