@@ -3,18 +3,26 @@ const fields = {
   httpStatus: document.querySelector("#httpStatus"),
   dotStatus: document.querySelector("#dotStatus"),
   frpcStatus: document.querySelector("#frpcStatus"),
+  certificateStatus: document.querySelector("#certificateStatus"),
   queryCount: document.querySelector("#queryCount"),
+  errorCount: document.querySelector("#errorCount"),
   apiDetail: document.querySelector("#apiDetail"),
+  certificateDetail: document.querySelector("#certificateDetail"),
   dotDetail: document.querySelector("#dotDetail"),
   frpcDetail: document.querySelector("#frpcDetail"),
-  httpPort: document.querySelector("#httpPort"),
-  dotPort: document.querySelector("#dotPort"),
-  remotePort: document.querySelector("#remotePort"),
+  publicHostname: document.querySelector("#publicHostname"),
+  publicDot: document.querySelector("#publicDot"),
+  localDot: document.querySelector("#localDot"),
+  frpsControl: document.querySelector("#frpsControl"),
+  authMode: document.querySelector("#authMode"),
+  certificateExpiry: document.querySelector("#certificateExpiry"),
   upstreamDns: document.querySelector("#upstreamDns"),
   lastQuery: document.querySelector("#lastQuery"),
-  frpcError: document.querySelector("#frpcError"),
+  serviceError: document.querySelector("#serviceError"),
   frpcLog: document.querySelector("#frpcLog"),
   refreshButton: document.querySelector("#refreshButton"),
+  apiDot: document.querySelector("#apiDot"),
+  certificateDot: document.querySelector("#certificateDot"),
   dotDot: document.querySelector("#dotDot"),
   frpcDot: document.querySelector("#frpcDot"),
 };
@@ -28,7 +36,7 @@ function formatUptime(seconds) {
 }
 
 function titleCase(value) {
-  return String(value)
+  return String(value || "unknown")
     .split("-")
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
@@ -39,60 +47,74 @@ function setDot(element, state) {
 }
 
 function setOverall(state) {
-  const labels = {
-    ok: "Operational",
-    warn: "Needs config",
-    bad: "Needs attention",
-  };
+  const labels = { ok: "Operational", warn: "Starting", bad: "Needs attention" };
   fields.overallStatus.className = `status-pill ${state}`;
   fields.overallStatus.textContent = labels[state];
 }
 
-function frpcCopy(checks, settings, metrics) {
-  if (!settings.frpc_enabled) return "FRPC is disabled by FRPC_ENABLED=false.";
-  if (!checks.frpc_configured) return "Set FRP_SERVER_ADDR on Render to start the FRPC tunnel.";
-  const authMode = checks.frp_auth_mode || settings.frp_auth_mode || "none";
-  if (checks.frpc === "running") {
-    return `FRPC is exposing local DoT on remote TCP port ${settings.frp_remote_port} with ${authMode} authentication.`;
+function certificateCopy(certificate, hostname) {
+  if (certificate.valid) {
+    const remaining = certificate.days_remaining === null ? "" : ` (${certificate.days_remaining} days remaining)`;
+    return `Valid for ${hostname}; source: ${certificate.source}${remaining}.`;
   }
-  if (checks.frpc === "exited") return `FRPC started but is no longer running${metrics.frpc_exit_code === null ? "." : `; exit code ${metrics.frpc_exit_code}.`}`;
-  return `FRPC is configured with ${authMode} authentication but has not reported a running process yet.`;
+  return certificate.error || "Certificate is missing or invalid.";
+}
+
+function frpcCopy(data) {
+  const state = data.checks.frpc;
+  const auth = data.checks.frp_auth_mode;
+  if (state === "disabled") return "FRPC is disabled.";
+  if (state === "needs-config") return "Set FRP_SERVER_ADDR on Render.";
+  if (state === "blocked") return "FRPC is blocked until the DoT listener becomes ready.";
+  if (state === "running") return `FRPC process is running with ${auth} authentication.`;
+  if (state === "starting") return `FRPC is starting with ${auth} authentication.`;
+  if (state === "startup-failed") return data.frpc.last_error || "FRPC failed during startup.";
+  if (state === "exited") return data.frpc.last_error || "FRPC exited unexpectedly.";
+  return "FRPC has not started.";
 }
 
 async function refreshStatus() {
   try {
     const response = await fetch("/api/status", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
-    const settings = data.settings;
-    const checks = data.checks;
+    const certificate = data.certificate;
     const metrics = data.metrics;
     const endpoints = data.endpoints;
-    const warning = settings.frpc_enabled && checks.frpc !== "running";
-    const failure = checks.frpc === "exited";
 
-    fields.httpStatus.textContent = titleCase(checks.http);
-    fields.dotStatus.textContent = titleCase(checks.dot);
-    fields.frpcStatus.textContent = titleCase(checks.frpc);
-    fields.queryCount.textContent = metrics.dot_queries;
+    fields.httpStatus.textContent = titleCase(data.checks.http);
+    fields.dotStatus.textContent = titleCase(data.checks.dot_listener);
+    fields.frpcStatus.textContent = titleCase(data.checks.frpc);
+    fields.certificateStatus.textContent = certificate.valid ? "Valid" : "Invalid";
+    fields.queryCount.textContent = metrics.dns_queries;
+    fields.errorCount.textContent = metrics.dns_errors;
     fields.apiDetail.textContent = `Healthy for ${formatUptime(data.uptime_seconds)} on ${endpoints.http}.`;
-    fields.dotDetail.textContent = settings.dot_enabled
-      ? `TLS DNS listener is ${checks.dot} at ${endpoints.dot_local} and forwards to ${endpoints.upstream_dns}.`
-      : "DNS-over-TLS is disabled by DOT_ENABLED=false.";
-    fields.frpcDetail.textContent = frpcCopy(checks, settings, metrics);
-    fields.httpPort.textContent = endpoints.http;
-    fields.dotPort.textContent = endpoints.dot_local;
-    fields.remotePort.textContent = `tcp/${endpoints.dot_remote_port}`;
-    fields.upstreamDns.textContent = endpoints.upstream_dns;
+    fields.certificateDetail.textContent = certificateCopy(certificate, data.public_dns_hostname || "the configured hostname");
+    fields.dotDetail.textContent = `Listener: ${endpoints.dot_local}; upstream: ${endpoints.upstream_resolver}.`;
+    fields.frpcDetail.textContent = frpcCopy(data);
+    fields.publicHostname.textContent = data.public_dns_hostname || "Not configured";
+    fields.publicDot.textContent = endpoints.dot_public || "Not configured";
+    fields.localDot.textContent = endpoints.dot_local;
+    fields.frpsControl.textContent = endpoints.frps_control || "Not configured";
+    fields.authMode.textContent = titleCase(data.checks.frp_auth_mode);
+    fields.certificateExpiry.textContent = certificate.expires_at || "Unavailable";
+    fields.upstreamDns.textContent = endpoints.upstream_resolver;
     fields.lastQuery.textContent = metrics.last_query_at || "No queries yet";
-    fields.frpcError.textContent = metrics.frpc_last_error || "";
-    fields.frpcLog.textContent = metrics.frpc_last_log ? `Last FRPC log: ${metrics.frpc_last_log}` : "";
-    setDot(fields.dotDot, checks.dot === "ready" || checks.dot === "disabled" ? "ok" : "warn");
-    setDot(fields.frpcDot, checks.frpc === "running" || checks.frpc === "disabled" ? "ok" : failure ? "bad" : "warn");
-    setOverall(failure ? "bad" : warning ? "warn" : "ok");
+    fields.serviceError.textContent = certificate.error || data.frpc.last_error || "";
+    fields.frpcLog.textContent = data.frpc.last_log ? `Last FRPC log: ${data.frpc.last_log}` : "";
+
+    setDot(fields.apiDot, "ok");
+    setDot(fields.certificateDot, certificate.valid ? "ok" : "bad");
+    setDot(fields.dotDot, data.checks.dot_listener === "running" || data.checks.dot_listener === "disabled" ? "ok" : "bad");
+    setDot(fields.frpcDot, data.checks.frpc === "running" || data.checks.frpc === "disabled" ? "ok" : ["starting", "not-started"].includes(data.checks.frpc) ? "warn" : "bad");
+
+    const starting = ["starting", "not-started"].includes(data.checks.dot_listener) || ["starting", "not-started"].includes(data.checks.frpc);
+    setOverall(data.ready ? "ok" : starting ? "warn" : "bad");
   } catch (error) {
     fields.overallStatus.className = "status-pill bad";
     fields.overallStatus.textContent = "Offline";
     fields.apiDetail.textContent = `Status API unavailable: ${error.message}`;
+    setDot(fields.apiDot, "bad");
   }
 }
 

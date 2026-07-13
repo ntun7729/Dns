@@ -3,25 +3,33 @@ services:
     name: dns-dashboard
     runtime: docker
     autoDeploy: true
-    healthCheckPath: /healthz
+    healthCheckPath: /readyz
     envVars:
+      - key: APP_ENV
+        value: "production"
       - key: PORT
-        value: 10000
+        value: "10000"
       - key: DOT_ENABLED
-        value: true
+        value: "true"
       - key: DOT_BIND_HOST
-        value: 127.0.0.1
+        value: "127.0.0.1"
       - key: DOT_PORT
-        value: 8853
+        value: "8853"
+      - key: DOT_PUBLIC_HOSTNAME
+        value: "dns.nyan.college"
+      - key: DOT_CERT_PEM
+        sync: false
+      - key: DOT_KEY_PEM
+        sync: false
       - key: FRPC_ENABLED
-        value: true
-      - key: FRP_REMOTE_PORT
-        value: 853
-      - key: UPSTREAM_DNS
-        value: 1.1.1.1
-      - key: UPSTREAM_DNS_PORT
-        value: 53
+        value: "true"
       - key: FRP_SERVER_ADDR
         sync: false
       - key: FRP_SERVER_PORT
-        value: 7000
+        value: "7000"
+      - key: FRP_REMOTE_PORT
+        value: "853"
+      - key: UPSTREAM_DNS
+        value: "1.1.1.1"
+      - key: UPSTREAM_DNS_PORT
+        value: "53"

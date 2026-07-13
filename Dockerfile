@@ -4,7 +4,7 @@ ARG FRP_VERSION=0.62.1
 ARG TARGETARCH
 
 LABEL org.opencontainers.image.source="https://github.com/ntun7729/Dns"
-LABEL org.opencontainers.image.description="Render-ready DNS dashboard with DoT and FRPC exposure"
+LABEL org.opencontainers.image.description="Render-ready DNS-over-TLS dashboard with FRPC exposure"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl openssl tar \
@@ -22,19 +22,31 @@ RUN set -eux; \
     install -m 0755 "/tmp/frp_${FRP_VERSION}_linux_${frp_arch}/frpc" /usr/local/bin/frpc; \
     rm -rf /tmp/frp*
 
-WORKDIR /app
-COPY app/ /app/app/
-COPY scripts/entrypoint.sh /entrypoint.sh
+RUN groupadd --system --gid 10001 app \
+    && useradd --system --uid 10001 --gid app --home-dir /app --create-home app
 
-ENV PORT=10000 \
+WORKDIR /app
+COPY --chown=app:app app/ /app/app/
+COPY --chown=app:app scripts/entrypoint.sh /entrypoint.sh
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    APP_ENV=production \
+    PORT=10000 \
     BIND_HOST=0.0.0.0 \
     DOT_ENABLED=true \
     DOT_BIND_HOST=127.0.0.1 \
     DOT_PORT=8853 \
     FRPC_ENABLED=true \
+    FRP_SERVER_PORT=7000 \
     FRP_REMOTE_PORT=853
 
-RUN chmod +x /entrypoint.sh
+RUN chmod 0755 /entrypoint.sh
 
+USER app
 EXPOSE 10000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '10000') + '/readyz', timeout=3)" || exit 1
+
 CMD ["/entrypoint.sh"]
