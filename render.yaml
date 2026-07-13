@@ -25,5 +25,3 @@ services:
         sync: false
       - key: FRP_SERVER_PORT
         value: 7000
-      - key: FRP_AUTH_TOKEN
-        sync: false
