@@ -45,6 +45,7 @@ body {
   color: var(--blue);
   font-size: 0.78rem;
   font-weight: 700;
+  letter-spacing: 0;
   text-transform: uppercase;
 }
 
@@ -56,7 +57,7 @@ p {
 
 h1 {
   margin-bottom: 12px;
-  font-size: clamp(2.45rem, 5vw, 5.6rem);
+  font-size: clamp(2.45rem, 5rem, 5.6rem);
   line-height: 0.96;
   letter-spacing: 0;
 }
@@ -67,7 +68,7 @@ h2 {
 }
 
 .subhead {
-  max-width: 690px;
+  max-width: 720px;
   margin-bottom: 0;
   color: var(--muted);
   font-size: 1.05rem;
@@ -94,6 +95,11 @@ h2 {
   background: var(--amber);
 }
 
+.status-pill.bad {
+  color: #4c0519;
+  background: var(--red);
+}
+
 .grid {
   display: grid;
   gap: 14px;
@@ -113,6 +119,7 @@ h2 {
 }
 
 .metrics article {
+  min-width: 0;
   padding: 20px;
 }
 
@@ -125,6 +132,7 @@ h2 {
 .metrics strong {
   display: block;
   margin-top: 12px;
+  overflow-wrap: anywhere;
   font-size: 1.5rem;
 }
 
@@ -135,6 +143,7 @@ h2 {
 }
 
 .panel {
+  min-width: 0;
   padding: 24px;
 }
 
@@ -154,6 +163,11 @@ button {
   cursor: pointer;
   font: inherit;
   font-weight: 800;
+}
+
+button:focus-visible {
+  outline: 3px solid var(--blue);
+  outline-offset: 3px;
 }
 
 .timeline {
@@ -180,6 +194,17 @@ button {
   margin-bottom: 0;
   color: var(--muted);
   line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.note:not(:empty) {
+  margin-top: 12px;
+  color: var(--amber);
+}
+
+.note.subtle:not(:empty) {
+  color: var(--muted);
+  font-size: 0.9rem;
 }
 
 .dot {
@@ -217,13 +242,16 @@ dl div {
 }
 
 dt {
+  flex: 0 0 auto;
   color: var(--muted);
 }
 
 dd {
+  min-width: 0;
   margin: 0;
   text-align: right;
   font-weight: 800;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 860px) {
@@ -241,5 +269,9 @@ dd {
   .shell {
     width: min(100vw - 24px, 680px);
     padding-top: 24px;
+  }
+
+  h1 {
+    font-size: 3rem;
   }
 }
