@@ -19,6 +19,8 @@ services:
         value: 853
       - key: UPSTREAM_DNS
         value: 1.1.1.1
+      - key: UPSTREAM_DNS_PORT
+        value: 53
       - key: FRP_SERVER_ADDR
         sync: false
       - key: FRP_SERVER_PORT
