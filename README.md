@@ -2,13 +2,14 @@
 
 A Render-ready DNS dashboard that runs a compact operations UI, a local DNS-over-TLS listener, and optional FRPC exposure for public TCP port `853`.
 
-## What ships in this first version
+## What ships
 
 - Premium dark operations dashboard at `/`
 - JSON health and status APIs at `/healthz`, `/readyz`, and `/api/status`
 - Local DNS-over-TLS listener on `127.0.0.1:8853`
 - UDP forwarding to an upstream resolver, defaulting to `1.1.1.1:53`
 - FRPC configuration generation that exposes local DoT through a remote FRP server on port `853`
+- Runtime status that distinguishes missing FRPC config, running tunnels, and exited FRPC processes
 - Render Docker deployment config in `render.yaml`
 - GitHub Actions workflow that builds and publishes the container to GHCR
 
