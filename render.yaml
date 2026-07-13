@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: dns-dashboard
+    runtime: docker
+    autoDeploy: true
+    healthCheckPath: /healthz
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: DOT_ENABLED
+        value: true
+      - key: DOT_BIND_HOST
+        value: 127.0.0.1
+      - key: DOT_PORT
+        value: 8853
+      - key: FRPC_ENABLED
+        value: true
+      - key: FRP_REMOTE_PORT
+        value: 853
+      - key: UPSTREAM_DNS
+        value: 1.1.1.1
+      - key: FRP_SERVER_ADDR
+        sync: false
+      - key: FRP_SERVER_PORT
+        value: 7000
+      - key: FRP_AUTH_TOKEN
+        sync: false
