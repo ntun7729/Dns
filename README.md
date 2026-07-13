@@ -1,6 +1,6 @@
 # DNS Dashboard
 
-A Render-hosted DNS-over-TLS service with a web operations dashboard, FRPC tunnel, quiet runtime, and automatic multi-upstream DNS failover.
+A Render-hosted DNS-over-TLS service with a protected operations dashboard, local DNS profiles, lightweight in-memory history, privacy-safe ad/tracker filtering, FRPC exposure, and automatic multi-upstream failover.
 
 ## Architecture
 
@@ -11,10 +11,12 @@ Android Private DNS
   -> FRPS public IP:853
   -> FRPC tunnel
   -> Render DoT listener at 127.0.0.1:8853
-  -> upstream pool: Cloudflare, Quad9, Google
+  -> active local profile
+       -> allowlist / manual blocklist / HaGeZi Light filter
+       -> upstream pool: Cloudflare, Quad9, Google
 ```
 
-## Current production deployment
+## Production deployment
 
 - Private DNS hostname: `dns.nyan.college`
 - FRPS public address: `152.42.239.169`
@@ -22,26 +24,102 @@ Android Private DNS
 - Public DoT port: `853`
 - Render web port: `10000`
 - Local Render DoT port: `8853`
-- Upstream pool: `1.1.1.1:53`, `9.9.9.9:53`, `8.8.8.8:53`
-- Upstream strategy: primary failover
-- Upstream timeout: 2 seconds per resolver
+- Default upstream pool: `1.1.1.1:53`, `9.9.9.9:53`, `8.8.8.8:53`
+- Default upstream strategy: primary failover
 - Runtime/access/FRPC output logging: disabled
-- FRP authentication: none
 - TLS secret format: single-line base64
 
 ## Documentation
 
 - [Complete deployment and operations guide](docs/DEPLOYMENT.md)
-- [Dashboard improvement plan](docs/DASHBOARD_ROADMAP.md)
+- [Dashboard and reliability improvement plan](docs/DASHBOARD_ROADMAP.md)
+
+## Dashboard access control
+
+Set both values in Render:
+
+```text
+DASHBOARD_USERNAME=admin
+DASHBOARD_PASSWORD=<strong unique password>
+```
+
+When both are set:
+
+- The dashboard and operational APIs require HTTP Basic authentication over Render HTTPS.
+- `/healthz` and `/readyz` remain available for Render health checks.
+- Profile-management controls are enabled.
+
+When either value is missing, the dashboard stays public and write controls remain disabled.
+
+## Local profile manager
+
+Profiles are managed by this DNS server itself. They are not NextDNS profiles and do not require NextDNS resolvers.
+
+Each named profile contains:
+
+- Upstream resolver list
+- `primary_failover` or `round_robin` strategy
+- Filtering enabled/disabled
+- Filtering preset
+- Manual blocklist
+- Allowlist
+
+The dashboard supports:
+
+- Create and edit
+- Activate
+- Duplicate
+- Delete
+- Export all profiles as JSON
+- Import a previous JSON backup
+
+Profiles are currently **in memory**. A Render restart resets them to environment defaults. Export profiles after important changes.
+
+## Ad and tracker filtering
+
+The first downloaded preset is:
+
+```text
+HaGeZi Light
+```
+
+The server downloads the domain-only list directly from the official `hagezi/dns-blocklists` repository and refreshes it periodically. The allowlist always overrides downloaded and manual block rules.
+
+Privacy behavior:
+
+- Queried domain names are inspected only in memory for the current DNS request.
+- Queried domain names are not stored in history or returned by the status API.
+- Client IP addresses are not displayed or stored by the dashboard.
+- Only aggregate query, blocked, error, latency, and failover counters are retained.
+
+## In-memory history
+
+The dashboard shows dependency-free canvas charts for:
+
+- Queries per minute
+- Blocked queries per minute
+- Errors per minute
+- Average upstream latency per minute
+
+Default history window:
+
+```text
+HISTORY_MINUTES=120
+```
+
+History is bounded and disappears when the Render service restarts.
 
 ## Production Render variables
 
-Required:
+Core variables:
 
 | Variable | Value or purpose |
 | --- | --- |
 | `APP_ENV` | `production` |
 | `PORT` | `10000` |
+| `DASHBOARD_USERNAME` | Dashboard login name |
+| `DASHBOARD_PASSWORD` | Dashboard login secret |
+| `HISTORY_MINUTES` | Bounded aggregate history, default `120` |
 | `DOT_ENABLED` | `true` |
 | `DOT_BIND_HOST` | `127.0.0.1` |
 | `DOT_PORT` | `8853` |
@@ -56,47 +134,26 @@ Required:
 | `UPSTREAM_STRATEGY` | `primary_failover` or `round_robin` |
 | `UPSTREAM_TIMEOUT_SECONDS` | Per-resolver timeout, default `2.0` |
 
-Recommended production values:
-
-```text
-UPSTREAM_DNS_SERVERS=1.1.1.1:53,9.9.9.9:53,8.8.8.8:53
-UPSTREAM_STRATEGY=primary_failover
-UPSTREAM_TIMEOUT_SECONDS=2.0
-```
-
-`primary_failover` sends normal traffic to the first resolver and only uses later resolvers when the previous resolver fails. `round_robin` distributes queries across every configured resolver.
-
-Optional:
+Initial default-profile variables:
 
 | Variable | Purpose |
 | --- | --- |
-| `FRP_AUTH_TOKEN` | Shared FRPS token. Omit it for tokenless FRPS. |
-| `UPSTREAM_DNS` | Legacy single-upstream fallback |
-| `UPSTREAM_DNS_PORT` | Legacy single-upstream port fallback |
-| `DOT_CERT_PEM` | Legacy multiline certificate variable. Prefer `DOT_CERT_B64`. |
-| `DOT_KEY_PEM` | Legacy multiline key variable. Prefer `DOT_KEY_B64`. |
+| `FILTER_ENABLED` | Enable filtering for the initial profile |
+| `BLOCKLIST_PRESET` | `off` or `hagezi_light` |
+| `FILTER_UPDATE_HOURS` | Download refresh interval |
+| `MANUAL_BLOCK_DOMAINS` | Optional comma- or newline-separated domains |
+| `ALLOW_DOMAINS` | Optional comma- or newline-separated domains |
 
-Never commit certificates, private keys, FRP tokens, or Render secret values to GitHub.
-
-## Dashboard capabilities
-
-- Certificate expiry warnings
-- DoT and FRPC health
-- Active and peak clients
-- Per-resolver latency and health
-- Automatic failover count
-- DNS error classification
-- Responsive phone layout
-- No raw runtime or FRPC log display
+Never commit certificates, private keys, dashboard passwords, FRP tokens, or Render secret values to GitHub.
 
 ## Status endpoints
 
-- `/healthz` — HTTP process liveness
-- `/readyz` — certificate, DoT, and FRPC readiness
-- `/api/status` — safe operational status and counters
+- `/healthz` — HTTP process liveness; unauthenticated
+- `/readyz` — certificate, DoT, and FRPC readiness; unauthenticated
+- `/api/status` — safe operational status and aggregate history; authenticated when enabled
+- `/api/control` — authenticated profile controls
+- `/api/control/export` — authenticated profile export
 - `/` — dashboard UI
-
-The status API never returns certificate PEM data, private keys, FRP tokens, queried domain names, or raw process logs.
 
 ## Local development
 
@@ -106,6 +163,8 @@ docker run --rm -p 10000:10000 \
   -e APP_ENV=development \
   -e FRPC_ENABLED=false \
   -e DOT_PUBLIC_HOSTNAME=dns-dashboard.local \
+  -e DASHBOARD_USERNAME=admin \
+  -e DASHBOARD_PASSWORD=change-me \
   -e UPSTREAM_DNS_SERVERS=1.1.1.1:53,9.9.9.9:53 \
   dns-dashboard
 ```
@@ -116,13 +175,7 @@ Open `http://localhost:10000`.
 
 ```bash
 python -m unittest discover -s tests -v
-python -m py_compile app/main.py app/enhanced_main.py
+python -m py_compile app/main.py app/enhanced_main.py app/managed_main.py
 node --check app/static/app.js
 docker build -t dns-dashboard:test .
-```
-
-GitHub Actions tests pull requests and publishes successful `main` and version-tag builds to:
-
-```text
-ghcr.io/ntun7729/dns
 ```
