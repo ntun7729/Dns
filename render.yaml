@@ -3,7 +3,7 @@ services:
     name: dns-dashboard
     runtime: docker
     autoDeploy: true
-    healthCheckPath: /readyz
+    healthCheckPath: /healthz
     envVars:
       - key: APP_ENV
         value: "production"
@@ -47,3 +47,7 @@ services:
         value: "primary_failover"
       - key: UPSTREAM_TIMEOUT_SECONDS
         value: "2.0"
+      - key: RESOLVER_COOLDOWN_SECONDS
+        value: "15"
+      - key: RESOLVER_COOLDOWN_MAX_SECONDS
+        value: "120"
