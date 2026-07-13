@@ -1,16 +1,38 @@
-name: Build and publish image
+name: Test, build, and publish image
 
 on:
+  pull_request:
   push:
     branches: ["main"]
     tags: ["v*.*.*"]
   workflow_dispatch:
 
 env:
-  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/ntun7729/dns
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Compile Python
+        run: python -m py_compile app/main.py
+
+      - name: Check dashboard JavaScript
+        run: node --check app/static/app.js
+
   docker:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -23,31 +45,30 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Normalize image name
-        id: image
-        run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-
-      - name: Extract metadata
+      - name: Extract image metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}
+          images: ${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
             type=ref,event=tag
             type=sha,prefix=sha-
 
-      - name: Build and push
+      - name: Build and publish
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
