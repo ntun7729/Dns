@@ -1,8 +1,9 @@
-serverAddr = "frps.example.com"
+serverAddr = "203.0.113.10"
 serverPort = 7000
 
-auth.method = "token"
-auth.token = "replace-with-render-secret"
+# Optional: uncomment only when FRPS uses token authentication.
+# auth.method = "token"
+# auth.token = "replace-with-render-secret"
 
 [[proxies]]
 name = "dns-over-tls"
