@@ -12,9 +12,17 @@
         <div>
           <p class="eyebrow">Render DNS-over-TLS operations</p>
           <h1>DNS Dashboard</h1>
-          <p class="subhead">Status for the trusted TLS certificate, local DoT listener, FRPC tunnel, public Android Private DNS hostname, and upstream resolver.</p>
+          <p class="subhead">Live certificate, resolver, DoT, and FRPC telemetry for the public Android Private DNS path.</p>
         </div>
-        <div class="status-pill" id="overallStatus">Checking</div>
+        <div class="hero-actions">
+          <span class="updated" id="lastUpdated">Waiting for data</span>
+          <div class="status-pill" id="overallStatus">Checking</div>
+        </div>
+      </section>
+
+      <section class="alert" id="certificateBanner" hidden>
+        <strong id="certificateBannerTitle">Certificate notice</strong>
+        <span id="certificateBannerText"></span>
       </section>
 
       <section class="grid metrics" aria-label="Service metrics">
@@ -24,6 +32,8 @@
         <article><span>Certificate</span><strong id="certificateStatus">-</strong></article>
         <article><span>DNS queries</span><strong id="queryCount">0</strong></article>
         <article><span>DNS errors</span><strong id="errorCount">0</strong></article>
+        <article><span>Upstream latency</span><strong id="upstreamLatency">-</strong></article>
+        <article><span>Active clients</span><strong id="activeConnections">0</strong></article>
       </section>
 
       <section class="layout">
@@ -49,6 +59,10 @@
               <div><strong>DNS-over-TLS</strong><p id="dotDetail">Waiting for listener details.</p></div>
             </div>
             <div>
+              <span class="dot neutral" id="upstreamDot"></span>
+              <div><strong>Upstream resolver</strong><p id="upstreamDetail">Waiting for resolver telemetry.</p></div>
+            </div>
+            <div>
               <span class="dot neutral" id="frpcDot"></span>
               <div><strong>FRPC exposure</strong><p id="frpcDetail">Waiting for FRPC details.</p></div>
             </div>
@@ -64,13 +78,39 @@
             <div><dt>Local DoT</dt><dd id="localDot">-</dd></div>
             <div><dt>FRPS control</dt><dd id="frpsControl">-</dd></div>
             <div><dt>FRP authentication</dt><dd id="authMode">-</dd></div>
+            <div><dt>FRPC session</dt><dd id="frpcSession">-</dd></div>
             <div><dt>Certificate expiry</dt><dd id="certificateExpiry">-</dd></div>
+            <div><dt>TLS secret format</dt><dd id="tlsSecretFormat">-</dd></div>
             <div><dt>Upstream resolver</dt><dd id="upstreamDns">-</dd></div>
+            <div><dt>Last upstream success</dt><dd id="lastUpstreamSuccess">-</dd></div>
             <div><dt>Last DNS query</dt><dd id="lastQuery">-</dd></div>
           </dl>
           <p class="note" id="serviceError"></p>
           <p class="note subtle" id="frpcLog"></p>
         </aside>
+      </section>
+
+      <section class="lower-grid">
+        <article class="panel">
+          <p class="eyebrow">Diagnostics</p>
+          <h2>Actionable checks</h2>
+          <div class="diagnostics" id="diagnosticsList">
+            <p class="empty">Waiting for diagnostics.</p>
+          </div>
+        </article>
+
+        <article class="panel">
+          <p class="eyebrow">DNS telemetry</p>
+          <h2>Error breakdown</h2>
+          <div class="error-grid">
+            <div><span>Upstream timeout</span><strong id="timeoutErrors">0</strong></div>
+            <div><span>Upstream socket</span><strong id="socketErrors">0</strong></div>
+            <div><span>Malformed message</span><strong id="malformedErrors">0</strong></div>
+            <div><span>Internal error</span><strong id="internalErrors">0</strong></div>
+            <div><span>Client disconnects</span><strong id="clientDisconnects">0</strong></div>
+            <div><span>Peak clients</span><strong id="peakConnections">0</strong></div>
+          </div>
+        </article>
       </section>
     </main>
     <script src="/app.js"></script>
