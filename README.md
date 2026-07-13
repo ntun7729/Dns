@@ -1,84 +1,130 @@
 # DNS Dashboard
 
-A Render-ready DNS dashboard that runs an operations UI, a local DNS-over-TLS listener, and FRPC exposure for public TCP port `853`.
+A Render-ready DNS-over-TLS service with an operations dashboard and an FRPC tunnel to a public FRPS server.
 
-## What ships
+## Network architecture
 
-- Dashboard at `/`
-- JSON endpoints at `/healthz`, `/readyz`, and `/api/status`
-- Local DNS-over-TLS listener on `127.0.0.1:8853`
-- UDP forwarding to an upstream resolver, defaulting to `1.1.1.1:53`
-- FRPC configuration generation for public TCP port `853`
-- Tokenless FRPC support, with optional token authentication
-- Render Docker deployment config in `render.yaml`
-- GHCR publishing to `ghcr.io/ntun7729/dns`
+```text
+Android Private DNS
+  -> dns.nyan.college:853
+  -> Cloudflare DNS-only A record
+  -> FRPS public IP:853
+  -> FRPC tunnel
+  -> Render DoT listener at 127.0.0.1:8853
+  -> upstream resolver at 1.1.1.1:53
+```
 
-## Render environment variables
+The Android hostname and the FRPS control address are separate values. `DOT_PUBLIC_HOSTNAME` is the trusted DNS name used by Android and the certificate. `FRP_SERVER_ADDR` may be a raw public IP address.
 
-Required for FRPC:
+## Production Render variables
 
-| Variable | Purpose |
+Required:
+
+| Variable | Value or purpose |
 | --- | --- |
-| `FRP_SERVER_ADDR` | Public IP address or hostname of the FRPS server |
-| `FRP_SERVER_PORT` | FRPS control port; default `7000` |
-| `FRP_REMOTE_PORT` | Public DoT port on FRPS; default `853` |
+| `APP_ENV` | `production` |
+| `DOT_PUBLIC_HOSTNAME` | `dns.nyan.college` |
+| `DOT_CERT_PEM` | Complete `fullchain.pem` contents |
+| `DOT_KEY_PEM` | Complete matching `privkey.pem` contents |
+| `FRP_SERVER_ADDR` | FRPS public IP or control hostname |
+| `FRP_SERVER_PORT` | Defaults to `7000` |
+| `FRP_REMOTE_PORT` | Defaults to `853` |
 
 Optional:
 
 | Variable | Purpose |
 | --- | --- |
-| `FRP_AUTH_TOKEN` | FRPS shared token. Leave unset when FRPS has no token authentication. |
-| `UPSTREAM_DNS` | Upstream DNS resolver; default `1.1.1.1` |
-| `UPSTREAM_DNS_PORT` | Upstream DNS port; default `53` |
-| `DOT_CERT_FILE` | Path to the DoT certificate inside the container |
-| `DOT_KEY_FILE` | Path to its matching private key |
+| `FRP_AUTH_TOKEN` | Shared FRPS token. Omit it for tokenless FRPS. |
+| `UPSTREAM_DNS` | Defaults to `1.1.1.1` |
+| `UPSTREAM_DNS_PORT` | Defaults to `53` |
 
-When `FRP_AUTH_TOKEN` is empty or absent, the generated FRPC configuration contains no `auth.method` or `auth.token` lines. When it is supplied, FRPC uses token authentication.
+When `FRP_AUTH_TOKEN` is absent or empty, generated FRPC configuration contains no FRP authentication lines. When supplied, both `auth.method = "token"` and the token are written to the private runtime config.
 
-For your current tokenless FRPS setup, configure Render with:
+## TLS behavior
 
-```text
-FRP_SERVER_ADDR=<FRPS public IP>
-FRP_SERVER_PORT=7000
-FRP_REMOTE_PORT=853
-FRPC_ENABLED=true
-```
+At startup, the application:
 
-Do not create `FRP_AUTH_TOKEN` in Render unless you later enable the same token on FRPS.
+1. Reads `DOT_CERT_PEM` and `DOT_KEY_PEM` without flattening PEM newlines.
+2. Writes them to a private runtime directory. The private key is mode `0600`.
+3. Confirms that the certificate matches `DOT_PUBLIC_HOSTNAME`.
+4. Confirms that the certificate is currently valid and not expired.
+5. Confirms that the private key matches the certificate.
+6. Starts the local DoT listener only after validation succeeds.
 
-## FRPS tokenless example
+Production never generates a certificate. Missing or invalid production certificate material keeps `/readyz` unhealthy and prevents FRPC from exposing a broken listener. Self-signed generation is available only when `APP_ENV=development`.
 
-```toml
-bindAddr = "0.0.0.0"
-bindPort = 7000
+Do not use Cloudflare Origin Certificates for Android Private DNS. Use a publicly trusted certificate such as the Let's Encrypt certificate generated for `dns.nyan.college`.
 
-allowPorts = [
-  { single = 853 }
-]
-```
-
-Do not put `auth.method` or `auth.token` in the FRPS configuration for tokenless operation. Restart FRPS after editing it.
-
-## Cloudflare record
+## Cloudflare DNS record
 
 ```text
 Type: A
 Name: dns
 Content: <FRPS public IP>
 Proxy status: DNS only / gray cloud
+TTL: Auto
 ```
 
-Android Private DNS hostname:
+Do not enable the orange-cloud proxy. Remove a conflicting `AAAA` record unless FRPS is also reachable over IPv6.
+
+## Render setup
+
+The included `render.yaml` asks Render for the FRPS address and both multiline PEM secrets. It deliberately does not require an FRP token.
+
+For the certificate created on the FRPS server, copy these complete files into the corresponding Render secret variables:
 
 ```text
-dns.nyan.college
+/etc/letsencrypt/live/dns.nyan.college/fullchain.pem -> DOT_CERT_PEM
+/etc/letsencrypt/live/dns.nyan.college/privkey.pem   -> DOT_KEY_PEM
 ```
 
-## Local verification
+Manual DNS-challenge certificates do not renew automatically without hooks. Repeat the Certbot DNS challenge before expiry, replace both Render secrets, and redeploy.
+
+## Status and readiness
+
+- `/healthz` is a process liveness endpoint.
+- `/readyz` requires a valid certificate, a running DoT listener, and a running FRPC process when FRPC is enabled.
+- `/api/status` safely reports:
+  - public DNS hostname
+  - DoT listener state
+  - FRPC process state
+  - FRP authentication mode (`none` or `token`)
+  - certificate validation and expiry
+  - upstream resolver
+  - DNS query and error counts
+
+The API never returns the FRP token, private key, certificate PEM, or complete secret values. FRPC output is redacted before it is logged or displayed.
+
+## Local development
+
+Local development may generate a temporary self-signed certificate:
+
+```bash
+docker build -t dns-dashboard .
+docker run --rm -p 10000:10000 \
+  -e APP_ENV=development \
+  -e FRPC_ENABLED=false \
+  -e DOT_PUBLIC_HOSTNAME=dns-dashboard.local \
+  dns-dashboard
+```
+
+Open `http://localhost:10000`.
+
+## Tests
 
 ```bash
 python -m unittest discover -s tests -v
 python -m py_compile app/main.py
+node --check app/static/app.js
+docker build -t dns-dashboard:test .
 ```
 
-The public status response reports `frp_auth_mode` as either `none` or `token` and never exposes the token value.
+Coverage includes tokenless and token-authenticated FRPC configuration, certificate environment loading, hostname and key matching, expiry and missing-certificate behavior, readiness, FRPC startup failures, file permissions, and secret redaction.
+
+## GHCR
+
+GitHub Actions runs tests first and publishes successful `main` and version-tag builds to:
+
+```text
+ghcr.io/ntun7729/dns
+```
