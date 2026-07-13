@@ -60,7 +60,7 @@
             </div>
             <div>
               <span class="dot neutral" id="upstreamDot"></span>
-              <div><strong>Upstream resolver</strong><p id="upstreamDetail">Waiting for resolver telemetry.</p></div>
+              <div><strong>Upstream resolvers</strong><p id="upstreamDetail">Waiting for resolver telemetry.</p></div>
             </div>
             <div>
               <span class="dot neutral" id="frpcDot"></span>
@@ -81,12 +81,14 @@
             <div><dt>FRPC session</dt><dd id="frpcSession">-</dd></div>
             <div><dt>Certificate expiry</dt><dd id="certificateExpiry">-</dd></div>
             <div><dt>TLS secret format</dt><dd id="tlsSecretFormat">-</dd></div>
-            <div><dt>Upstream resolver</dt><dd id="upstreamDns">-</dd></div>
-            <div><dt>Last upstream success</dt><dd id="lastUpstreamSuccess">-</dd></div>
+            <div><dt>Resolver strategy</dt><dd id="upstreamStrategy">-</dd></div>
+            <div><dt>Configured resolvers</dt><dd id="upstreamDns">-</dd></div>
+            <div><dt>Last upstream used</dt><dd id="lastUpstreamUsed">-</dd></div>
+            <div><dt>Failovers</dt><dd id="upstreamFailovers">0</dd></div>
+            <div><dt>Runtime logging</dt><dd id="runtimeLogging">-</dd></div>
             <div><dt>Last DNS query</dt><dd id="lastQuery">-</dd></div>
           </dl>
           <p class="note" id="serviceError"></p>
-          <p class="note subtle" id="frpcLog"></p>
         </aside>
       </section>
 
@@ -111,6 +113,19 @@
             <div><span>Peak clients</span><strong id="peakConnections">0</strong></div>
           </div>
         </article>
+      </section>
+
+      <section class="panel resolver-panel">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">Upstream pool</p>
+            <h2>Resolver health</h2>
+          </div>
+          <span class="mini-pill" id="upstreamPoolStatus">Waiting</span>
+        </div>
+        <div class="resolver-grid" id="resolverGrid">
+          <p class="empty">Waiting for resolver data.</p>
+        </div>
       </section>
     </main>
     <script src="/app.js"></script>
