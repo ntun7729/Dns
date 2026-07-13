@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import threading
 from pathlib import Path
@@ -9,6 +8,20 @@ from pathlib import Path
 from settings import Settings, now_iso
 from certificates import redact_text, secure_write
 from telemetry import RuntimeState
+
+
+_FRPC_CHILD_ENV = {
+    "PATH": "/usr/local/bin:/usr/bin:/bin",
+    "HOME": "/tmp",
+    "TMPDIR": "/tmp",
+    "SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt",
+    "SSL_CERT_DIR": "/etc/ssl/certs",
+}
+
+
+def frpc_child_environment() -> dict[str, str]:
+    """Return the minimal non-secret environment inherited by FRPC."""
+    return dict(_FRPC_CHILD_ENV)
 
 
 def toml_string(value: str) -> str:
@@ -99,14 +112,7 @@ def start_frpc(
 
     config = write_frpc_config(settings)
     assert config is not None
-    child_env = {
-        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        "HOME": "/tmp",
-        "SSL_CERT_FILE": os.getenv(
-            "SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt"
-        ),
-        "SSL_CERT_DIR": os.getenv("SSL_CERT_DIR", "/etc/ssl/certs"),
-    }
+    child_env = frpc_child_environment()
     try:
         process = subprocess.Popen(
             [settings.frpc_binary, "-c", str(config)],
