@@ -2,13 +2,20 @@
 set -eu
 umask 077
 
+if [ -n "${DOT_CERT_B64:-}" ]; then
+  DOT_CERT_PEM=$(printf '%s' "$DOT_CERT_B64" | tr -d '\r\n ' | base64 -d)
+  export DOT_CERT_PEM
+fi
+
+if [ -n "${DOT_KEY_B64:-}" ]; then
+  DOT_KEY_PEM=$(printf '%s' "$DOT_KEY_B64" | tr -d '\r\n ' | base64 -d)
+  export DOT_KEY_PEM
+fi
+
 normalize_pem_env() {
   variable_name="$1"
   eval "variable_value=\${$variable_name-}"
   if [ -n "$variable_value" ]; then
-    # Render can preserve some real line breaks while leaving other separators
-    # as the two visible characters \\n. Convert both forms before Python
-    # writes the certificate and private key to disk.
     variable_value=$(printf '%b' "$variable_value")
     export "$variable_name=$variable_value"
   fi
