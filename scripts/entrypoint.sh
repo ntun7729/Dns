@@ -2,15 +2,19 @@
 set -eu
 umask 077
 
-if [ -n "${DOT_CERT_B64:-}" ]; then
-  DOT_CERT_PEM=$(printf '%s' "$DOT_CERT_B64" | tr -d '\r\n ' | base64 -d)
-  export DOT_CERT_PEM
-fi
-
-if [ -n "${DOT_KEY_B64:-}" ]; then
-  DOT_KEY_PEM=$(printf '%s' "$DOT_KEY_B64" | tr -d '\r\n ' | base64 -d)
-  export DOT_KEY_PEM
-fi
+decode_base64_env() {
+  source_name="$1"
+  target_name="$2"
+  eval "source_value=\${$source_name-}"
+  if [ -z "$source_value" ]; then
+    return
+  fi
+  if ! decoded_value=$(printf '%s' "$source_value" | tr -d '\r\n ' | base64 -d); then
+    echo "$source_name is not valid base64." >&2
+    exit 1
+  fi
+  export "$target_name=$decoded_value"
+}
 
 normalize_pem_env() {
   variable_name="$1"
@@ -21,7 +25,9 @@ normalize_pem_env() {
   fi
 }
 
+decode_base64_env DOT_CERT_B64 DOT_CERT_PEM
+decode_base64_env DOT_KEY_B64 DOT_KEY_PEM
 normalize_pem_env DOT_CERT_PEM
 normalize_pem_env DOT_KEY_PEM
 
-exec python /app/app/serve_ui_fixes.py
+exec python /app/app/application.py

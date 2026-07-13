@@ -17,9 +17,30 @@ RUN set -eux; \
       arm64) frp_arch="arm64" ;; \
       *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL "https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_${FRP_VERSION}_linux_${frp_arch}.tar.gz" -o /tmp/frp.tar.gz; \
-    tar -xzf /tmp/frp.tar.gz -C /tmp; \
+    archive="frp_${FRP_VERSION}_linux_${frp_arch}.tar.gz"; \
+    checksums="frp_sha256_checksums.txt"; \
+    release="https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}"; \
+    curl --proto '=https' --proto-redir '=https' -fsSL --retry 3 --retry-delay 2 \
+      "$release/$checksums" -o "/tmp/$checksums"; \
+    curl --proto '=https' --proto-redir '=https' -fsSL --retry 3 --retry-delay 2 \
+      "$release/$archive" -o "/tmp/$archive"; \
+    awk -v archive="$archive" ' \
+      { \
+        name = $2; \
+        sub(/^\*/, "", name); \
+        if (length($1) == 64 && $1 ~ /^[0-9A-Fa-f]+$/ && name == archive) { \
+          print tolower($1) "  /tmp/" archive; \
+          found++; \
+        } \
+      } \
+      END { if (found != 1) exit 1 } \
+    ' "/tmp/$checksums" > "/tmp/$archive.sha256"; \
+    test -s "/tmp/$archive.sha256"; \
+    sha256sum -c "/tmp/$archive.sha256"; \
+    tar -xzf "/tmp/$archive" -C /tmp; \
+    test -x "/tmp/frp_${FRP_VERSION}_linux_${frp_arch}/frpc"; \
     install -m 0755 "/tmp/frp_${FRP_VERSION}_linux_${frp_arch}/frpc" /usr/local/bin/frpc; \
+    frpc --version; \
     rm -rf /tmp/frp*
 
 RUN groupadd --system --gid 10001 app \
@@ -45,8 +66,9 @@ RUN chmod 0755 /entrypoint.sh
 
 USER app
 EXPOSE 10000
+STOPSIGNAL SIGTERM
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '10000') + '/readyz', timeout=3)" || exit 1
+  CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '10000') + '/healthz', timeout=3)" || exit 1
 
 CMD ["/entrypoint.sh"]
