@@ -1,7 +1,6 @@
 FROM python:3.12-slim
 
 ARG FRP_VERSION=0.62.1
-ARG FRP_SHA256=""
 ARG TARGETARCH
 
 LABEL org.opencontainers.image.source="https://github.com/ntun7729/Dns"
@@ -19,13 +18,25 @@ RUN set -eux; \
       *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
     esac; \
     archive="frp_${FRP_VERSION}_linux_${frp_arch}.tar.gz"; \
+    checksums="frp_sha256_checksums.txt"; \
     release="https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}"; \
-    curl -fsSL --retry 3 --retry-delay 2 "$release/$archive" -o "/tmp/$archive"; \
-    actual="$(sha256sum "/tmp/$archive" | awk '{print $1}')"; \
-    echo "Downloaded $archive with SHA-256 $actual"; \
-    if [ -n "$FRP_SHA256" ]; then \
-      [ "$actual" = "$FRP_SHA256" ] || { echo "FRP archive checksum mismatch." >&2; exit 1; }; \
-    fi; \
+    curl --proto '=https' --proto-redir '=https' -fsSL --retry 3 --retry-delay 2 \
+      "$release/$checksums" -o "/tmp/$checksums"; \
+    curl --proto '=https' --proto-redir '=https' -fsSL --retry 3 --retry-delay 2 \
+      "$release/$archive" -o "/tmp/$archive"; \
+    awk -v archive="$archive" ' \
+      { \
+        name = $2; \
+        sub(/^\*/, "", name); \
+        if (length($1) == 64 && $1 ~ /^[0-9A-Fa-f]+$/ && name == archive) { \
+          print tolower($1) "  /tmp/" archive; \
+          found++; \
+        } \
+      } \
+      END { if (found != 1) exit 1 } \
+    ' "/tmp/$checksums" > "/tmp/$archive.sha256"; \
+    test -s "/tmp/$archive.sha256"; \
+    sha256sum -c "/tmp/$archive.sha256"; \
     tar -xzf "/tmp/$archive" -C /tmp; \
     test -x "/tmp/frp_${FRP_VERSION}_linux_${frp_arch}/frpc"; \
     install -m 0755 "/tmp/frp_${FRP_VERSION}_linux_${frp_arch}/frpc" /usr/local/bin/frpc; \
