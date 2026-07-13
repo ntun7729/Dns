@@ -12,7 +12,7 @@
         <div>
           <p class="eyebrow">Render-ready DNS operations</p>
           <h1>DNS Dashboard</h1>
-          <p class="subhead">Monitor the dashboard service, DNS-over-TLS listener, and FRPC exposure path from one compact control surface.</p>
+          <p class="subhead">Operational visibility for the HTTP control surface, local DNS-over-TLS listener, and FRPC exposure path on TCP 853.</p>
         </div>
         <div class="status-pill" id="overallStatus">Checking</div>
       </section>
@@ -47,21 +47,21 @@
           </div>
           <div class="timeline">
             <div>
-              <span class="dot ok"></span>
+              <span class="dot ok" id="apiDot"></span>
               <div>
                 <strong>Dashboard API</strong>
                 <p id="apiDetail">Waiting for status.</p>
               </div>
             </div>
             <div>
-              <span class="dot warn"></span>
+              <span class="dot neutral" id="dotDot"></span>
               <div>
                 <strong>DNS-over-TLS</strong>
                 <p id="dotDetail">Waiting for listener details.</p>
               </div>
             </div>
             <div>
-              <span class="dot neutral"></span>
+              <span class="dot neutral" id="frpcDot"></span>
               <div>
                 <strong>FRPC exposure</strong>
                 <p id="frpcDetail">Waiting for FRPC details.</p>
@@ -74,12 +74,14 @@
           <p class="eyebrow">Configuration</p>
           <h2>Render + FRPC</h2>
           <dl>
-            <div><dt>HTTP port</dt><dd id="httpPort">-</dd></div>
+            <div><dt>HTTP endpoint</dt><dd id="httpPort">-</dd></div>
             <div><dt>Local DoT</dt><dd id="dotPort">-</dd></div>
             <div><dt>Remote DoT</dt><dd id="remotePort">-</dd></div>
             <div><dt>Upstream DNS</dt><dd id="upstreamDns">-</dd></div>
+            <div><dt>Last query</dt><dd id="lastQuery">-</dd></div>
           </dl>
           <p class="note" id="frpcError"></p>
+          <p class="note subtle" id="frpcLog"></p>
         </aside>
       </section>
     </main>
