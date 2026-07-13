@@ -22,14 +22,26 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Run unit tests
+      - name: Compile all Python
+        run: python -m compileall -q app tests
+
+      - name: Run unit and integration tests
         run: python -m unittest discover -s tests -v
 
-      - name: Compile Python
-        run: python -m py_compile app/main.py
-
       - name: Check dashboard JavaScript
-        run: node --check app/static/app.js
+        run: |
+          node --check app/static/app.js
+          node --check app/static/ui_fixes.js
+
+      - name: Check entrypoint shell syntax
+        run: sh -n scripts/entrypoint.sh
+
+      - name: Verify production entrypoint
+        run: |
+          grep -F "exec python /app/app/application.py" scripts/entrypoint.sh
+          test -f app/application.py
+          test -f app/dns_service.py
+          test -f app/web_app.py
 
   docker:
     needs: test
