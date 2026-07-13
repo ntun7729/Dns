@@ -1,6 +1,6 @@
 # DNS Dashboard
 
-A Render-hosted DNS-over-TLS service with a web operations dashboard and an FRPC tunnel to a public FRPS server.
+A Render-hosted DNS-over-TLS service with a web operations dashboard, FRPC tunnel, quiet runtime, and automatic multi-upstream DNS failover.
 
 ## Architecture
 
@@ -11,7 +11,7 @@ Android Private DNS
   -> FRPS public IP:853
   -> FRPC tunnel
   -> Render DoT listener at 127.0.0.1:8853
-  -> upstream resolver at 1.1.1.1:53
+  -> upstream pool: Cloudflare, Quad9, Google
 ```
 
 ## Current production deployment
@@ -22,14 +22,17 @@ Android Private DNS
 - Public DoT port: `853`
 - Render web port: `10000`
 - Local Render DoT port: `8853`
-- Upstream resolver: `1.1.1.1:53`
+- Upstream pool: `1.1.1.1:53`, `9.9.9.9:53`, `8.8.8.8:53`
+- Upstream strategy: primary failover
+- Upstream timeout: 2 seconds per resolver
+- Runtime/access/FRPC output logging: disabled
 - FRP authentication: none
 - TLS secret format: single-line base64
 
 ## Documentation
 
 - [Complete deployment and operations guide](docs/DEPLOYMENT.md)
-- [Dashboard feature roadmap](docs/DASHBOARD_ROADMAP.md)
+- [Dashboard improvement plan](docs/DASHBOARD_ROADMAP.md)
 
 ## Production Render variables
 
@@ -49,18 +52,42 @@ Required:
 | `FRP_SERVER_ADDR` | Public IP or hostname of FRPS |
 | `FRP_SERVER_PORT` | `7000` |
 | `FRP_REMOTE_PORT` | `853` |
-| `UPSTREAM_DNS` | `1.1.1.1` |
-| `UPSTREAM_DNS_PORT` | `53` |
+| `UPSTREAM_DNS_SERVERS` | Comma-separated `host:port` resolver list |
+| `UPSTREAM_STRATEGY` | `primary_failover` or `round_robin` |
+| `UPSTREAM_TIMEOUT_SECONDS` | Per-resolver timeout, default `2.0` |
+
+Recommended production values:
+
+```text
+UPSTREAM_DNS_SERVERS=1.1.1.1:53,9.9.9.9:53,8.8.8.8:53
+UPSTREAM_STRATEGY=primary_failover
+UPSTREAM_TIMEOUT_SECONDS=2.0
+```
+
+`primary_failover` sends normal traffic to the first resolver and only uses later resolvers when the previous resolver fails. `round_robin` distributes queries across every configured resolver.
 
 Optional:
 
 | Variable | Purpose |
 | --- | --- |
 | `FRP_AUTH_TOKEN` | Shared FRPS token. Omit it for tokenless FRPS. |
+| `UPSTREAM_DNS` | Legacy single-upstream fallback |
+| `UPSTREAM_DNS_PORT` | Legacy single-upstream port fallback |
 | `DOT_CERT_PEM` | Legacy multiline certificate variable. Prefer `DOT_CERT_B64`. |
 | `DOT_KEY_PEM` | Legacy multiline key variable. Prefer `DOT_KEY_B64`. |
 
 Never commit certificates, private keys, FRP tokens, or Render secret values to GitHub.
+
+## Dashboard capabilities
+
+- Certificate expiry warnings
+- DoT and FRPC health
+- Active and peak clients
+- Per-resolver latency and health
+- Automatic failover count
+- DNS error classification
+- Responsive phone layout
+- No raw runtime or FRPC log display
 
 ## Status endpoints
 
@@ -69,7 +96,7 @@ Never commit certificates, private keys, FRP tokens, or Render secret values to 
 - `/api/status` — safe operational status and counters
 - `/` — dashboard UI
 
-The status API never returns certificate PEM data, private keys, or FRP tokens.
+The status API never returns certificate PEM data, private keys, FRP tokens, queried domain names, or raw process logs.
 
 ## Local development
 
@@ -79,6 +106,7 @@ docker run --rm -p 10000:10000 \
   -e APP_ENV=development \
   -e FRPC_ENABLED=false \
   -e DOT_PUBLIC_HOSTNAME=dns-dashboard.local \
+  -e UPSTREAM_DNS_SERVERS=1.1.1.1:53,9.9.9.9:53 \
   dns-dashboard
 ```
 
@@ -88,7 +116,7 @@ Open `http://localhost:10000`.
 
 ```bash
 python -m unittest discover -s tests -v
-python -m py_compile app/main.py
+python -m py_compile app/main.py app/enhanced_main.py
 node --check app/static/app.js
 docker build -t dns-dashboard:test .
 ```
