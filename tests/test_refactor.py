@@ -83,7 +83,7 @@ class RefactorTests(unittest.TestCase):
         self.assertIn("_sip._tcp.example.com", updated.allow)
 
     def test_frpc_child_environment_excludes_application_secrets(self) -> None:
-        sensitive = {
+        secret_values = {
             "DOT_CERT_PEM": "certificate-secret",
             "DOT_KEY_PEM": "private-key-secret",
             "DOT_CERT_B64": "certificate-base64-secret",
@@ -91,10 +91,13 @@ class RefactorTests(unittest.TestCase):
             "DASHBOARD_USERNAME": "dashboard-user",
             "DASHBOARD_PASSWORD": "dashboard-password-secret",
             "FRP_AUTH_TOKEN": "frp-token-secret",
+        }
+        parent_env = {
+            **secret_values,
             "PATH": "/tmp/untrusted-path",
             "SSL_CERT_FILE": "/tmp/untrusted-ca-file",
         }
-        with mock.patch.dict(os.environ, sensitive, clear=True):
+        with mock.patch.dict(os.environ, parent_env, clear=True):
             child_env = frpc_child_environment()
         self.assertEqual(
             child_env,
@@ -106,9 +109,11 @@ class RefactorTests(unittest.TestCase):
                 "SSL_CERT_DIR": "/etc/ssl/certs",
             },
         )
-        for variable, value in sensitive.items():
+        for variable, value in secret_values.items():
             self.assertNotIn(variable, child_env)
             self.assertNotIn(value, child_env.values())
+        self.assertNotEqual(child_env["PATH"], parent_env["PATH"])
+        self.assertNotEqual(child_env["SSL_CERT_FILE"], parent_env["SSL_CERT_FILE"])
 
     def test_protocol_error_responses_preserve_transaction(self) -> None:
         query = dns_query()
