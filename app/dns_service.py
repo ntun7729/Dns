@@ -342,7 +342,7 @@ async def handle_dot(
             task = asyncio.create_task(process_query(payload))
             tasks.add(task)
             task.add_done_callback(tasks.discard)
-    except (ConnectionResetError, BrokenPipeError, ssl.SSLError, ConnectionError):
+    except (OSError, ssl.SSLError):
         runtime.record_unexpected_disconnect()
     except Exception as exc:
         runtime.record_dns_error(classify_dns_error(exc), redact_text(str(exc), settings))
