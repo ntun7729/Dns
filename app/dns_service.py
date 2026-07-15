@@ -19,6 +19,48 @@ _RESOLVER_CACHE_LOCK = threading.Lock()
 RESOLVER_CACHE_TTL = 300.0  # 5 minutes
 
 
+_DNS_CACHE: dict[tuple[str, bytes], tuple[bytes, float]] = {}
+_DNS_CACHE_LOCK = threading.Lock()
+
+
+def get_cached_dns_response(domain: str, qtype_class: bytes, transaction_id: bytes) -> bytes | None:
+    key = (domain, qtype_class)
+    now = time.monotonic()
+    with _DNS_CACHE_LOCK:
+        if key in _DNS_CACHE:
+            response, expiry = _DNS_CACHE[key]
+            if now < expiry:
+                return transaction_id + response[2:]
+            else:
+                del _DNS_CACHE[key]
+    return None
+
+
+def cache_dns_response(domain: str, qtype_class: bytes, response: bytes, question_end: int) -> None:
+    if len(response) < 4:
+        return
+    rcode = response[3] & 0x0F
+    if rcode not in (0, 3):  # Only cache NOERROR and NXDOMAIN
+        return
+
+    # Attempt to parse TTL from first answer record
+    ttl = 10.0  # default fallback TTL (10 seconds)
+    try:
+        if len(response) > question_end + 10:
+            if response[question_end] & 0xC0 == 0xC0:
+                ttl_bytes = response[question_end + 6 : question_end + 10]
+                parsed_ttl = int.from_bytes(ttl_bytes, "big")
+                if 1 <= parsed_ttl <= 86400:
+                    ttl = float(parsed_ttl)
+    except Exception:
+        pass
+
+    key = (domain, qtype_class)
+    now = time.monotonic()
+    with _DNS_CACHE_LOCK:
+        _DNS_CACHE[key] = (response, now + ttl)
+
+
 def _resolve_endpoint(host: str, port: int, socktype: int) -> list[tuple]:
     try:
         ip = ipaddress.ip_address(host)
@@ -251,7 +293,11 @@ async def handle_dot(
             if blocked:
                 response = build_nxdomain_response(payload, question_end)
             else:
-                response = await forward_dns_query(payload, profile, runtime, settings)
+                qtype_class = payload[question_end - 4 : question_end]
+                response = get_cached_dns_response(domain, qtype_class, payload[:2])
+                if response is None:
+                    response = await forward_dns_query(payload, profile, runtime, settings)
+                    cache_dns_response(domain, qtype_class, response, question_end)
         except ValueError as exc:
             runtime.record_dns_error("malformed_message", str(exc))
             response = build_formerr_response(payload, question_end)
