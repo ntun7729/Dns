@@ -2,6 +2,14 @@
 
 A Render-hosted DNS-over-TLS service with a protected operations dashboard, local DNS profiles, lightweight in-memory history, privacy-safe ad/tracker filtering, FRPC exposure, and automatic multi-upstream failover.
 
+## Core Features & Optimizations
+
+* **Concurrent DoT Handling:** Processes incoming queries asynchronously in parallel tasks, eliminating head-of-line blocking on long-lived connections (particularly for Android Private DNS).
+* **Upstream Caching Resolver:** Employs a thread-safe caching resolver (5-minute TTL) with direct IP bypass for numeric upstreams and IPv4 sorting preference to prevent lookup latency on IPv6-unfriendly hosting providers.
+* **Active Connection Protections:** Enforces a 60-second idle connection timeout and a 5-second slow-sender query timeout to defend against file descriptor exhaustion and Slowloris-style denial-of-service.
+* **Zero-Downtime TLS Hot-Reloading:** Watches certificate file modifications on disk and reloads them dynamically into the active `ssl.SSLContext` without dropping client connections or requiring process restarts.
+* **Premium Dashboard Redesign:** Feature-rich interface designed with a dark space-cyber aesthetic using Google Fonts (Plus Jakarta Sans), clean glassmorphism panels, responsive grid structures, and interactive canvas charts with semi-transparent linear-gradient telemetry fills.
+
 ## Architecture
 
 ```text
@@ -175,7 +183,4 @@ Open `http://localhost:10000`.
 
 ```bash
 python -m unittest discover -s tests -v
-python -m py_compile app/main.py app/enhanced_main.py app/managed_main.py
-node --check app/static/app.js
-docker build -t dns-dashboard:test .
 ```

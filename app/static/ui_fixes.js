@@ -51,6 +51,19 @@
     return points.slice(start);
   }
 
+  chartPalette = function customChartPalette() {
+    const s = getComputedStyle(document.documentElement);
+    return {
+      query: s.getPropertyValue("--blue").trim() || "#3b82f6",
+      blocked: s.getPropertyValue("--amber").trim() || "#f59e0b",
+      error: s.getPropertyValue("--red").trim() || "#ef4444",
+      latency: s.getPropertyValue("--green").trim() || "#10b981",
+      grid: "rgba(255, 255, 255, 0.05)",
+      text: s.getPropertyValue("--muted").trim() || "#94a3b8",
+      background: "#090c13"
+    };
+  };
+
   drawChart = function stableDrawChart(canvas, points, series) {
     if (!canvas || canvas.offsetParent === null) return;
 
@@ -100,20 +113,21 @@
     const count = Math.max(points.length, 2);
     for (const item of series) {
       ctx.strokeStyle = item.color;
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 2.5;
       ctx.lineJoin = "round";
       ctx.lineCap = "round";
       ctx.beginPath();
       let segmentOpen = false;
+      const pathPoints = [];
 
       points.forEach((point, index) => {
         const value = finiteValue(point[item.key]);
         if (value === null) {
-          segmentOpen = false;
           return;
         }
         const x = padding.left + (index / (count - 1)) * plotWidth;
         const y = padding.top + plotHeight - (value / maxValue) * plotHeight;
+        pathPoints.push({ x, y });
         if (!segmentOpen) {
           ctx.moveTo(x, y);
           segmentOpen = true;
@@ -122,6 +136,44 @@
         }
       });
       ctx.stroke();
+
+      if (pathPoints.length > 1) {
+        ctx.beginPath();
+        ctx.moveTo(pathPoints[0].x, padding.top + plotHeight);
+        pathPoints.forEach(pt => {
+          ctx.lineTo(pt.x, pt.y);
+        });
+        ctx.lineTo(pathPoints[pathPoints.length - 1].x, padding.top + plotHeight);
+        ctx.closePath();
+
+        const grad = ctx.createLinearGradient(0, padding.top, 0, padding.top + plotHeight);
+        const baseColor = item.color;
+        let rgbaStart = "rgba(59, 130, 246, 0.12)";
+        let rgbaEnd = "rgba(59, 130, 246, 0.0)";
+        if (baseColor.startsWith("#")) {
+          const r = parseInt(baseColor.slice(1, 3), 16);
+          const g = parseInt(baseColor.slice(3, 5), 16);
+          const b = parseInt(baseColor.slice(5, 7), 16);
+          rgbaStart = `rgba(${r}, ${g}, ${b}, 0.12)`;
+          rgbaEnd = `rgba(${r}, ${g}, ${b}, 0.0)`;
+        } else if (baseColor === "var(--blue)" || baseColor.includes("--blue")) {
+          rgbaStart = "rgba(59, 130, 246, 0.12)";
+          rgbaEnd = "rgba(59, 130, 246, 0.0)";
+        } else if (baseColor === "var(--amber)" || baseColor.includes("--amber")) {
+          rgbaStart = "rgba(245, 158, 11, 0.12)";
+          rgbaEnd = "rgba(245, 158, 11, 0.0)";
+        } else if (baseColor === "var(--red)" || baseColor.includes("--red")) {
+          rgbaStart = "rgba(239, 68, 68, 0.12)";
+          rgbaEnd = "rgba(239, 68, 68, 0.0)";
+        } else if (baseColor === "var(--green)" || baseColor.includes("--green")) {
+          rgbaStart = "rgba(16, 185, 129, 0.12)";
+          rgbaEnd = "rgba(16, 185, 129, 0.0)";
+        }
+        grad.addColorStop(0, rgbaStart);
+        grad.addColorStop(1, rgbaEnd);
+        ctx.fillStyle = grad;
+        ctx.fill();
+      }
     }
 
     if (points.length) {
