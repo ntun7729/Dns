@@ -205,6 +205,7 @@ class Settings:
     initial_manual_block: str = ""
     initial_allow: str = ""
     initial_custom_sources: str = ""
+    profiles_file: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -287,6 +288,7 @@ class Settings:
             initial_manual_block=os.getenv("MANUAL_BLOCK_DOMAINS", ""),
             initial_allow=os.getenv("ALLOW_DOMAINS", ""),
             initial_custom_sources=os.getenv("CUSTOM_BLOCKLIST_URLS", ""),
+            profiles_file=os.getenv("PROFILES_FILE", "").strip(),
         )
 
     @property

@@ -143,6 +143,56 @@ class ProfileStore:
         self.profiles: dict[str, ProfileSnapshot] = {initial.id: initial}
         self.active_id = initial.id
         self._active_snapshot = initial
+        self._load_from_file()
+
+    def _save_to_file(self) -> None:
+        if not self.settings.profiles_file:
+            return
+        from pathlib import Path
+        import json
+        from certificates import secure_write
+        try:
+            path = Path(self.settings.profiles_file)
+            data = self.export()
+            secure_write(path, json.dumps(data, indent=2))
+        except Exception as exc:
+            print(f"Error saving profiles to file: {exc}")
+
+    def _load_from_file(self) -> None:
+        if not self.settings.profiles_file:
+            return
+        from pathlib import Path
+        import json
+        path = Path(self.settings.profiles_file)
+        if not path.is_file():
+            self._save_to_file()
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if data.get("format") != "dns-dashboard-profiles-v1":
+                return
+            raw_profiles = data.get("profiles")
+            if not isinstance(raw_profiles, list) or not raw_profiles:
+                return
+
+            imported: dict[str, ProfileSnapshot] = {}
+            for raw in raw_profiles:
+                validated = self._validate(raw)
+                profile_id = str(raw.get("id", "")).strip() or uuid.uuid4().hex[:12]
+                imported[profile_id] = self._new_profile(
+                    **validated,
+                    profile_id=profile_id,
+                    created_at=str(raw.get("created_at", "")).strip() or None,
+                )
+
+            requested_active = str(data.get("active_profile_id", "")).strip()
+            self.profiles = imported
+            self.active_id = (
+                requested_active if requested_active in imported else next(iter(imported))
+            )
+            self._active_snapshot = self.profiles[self.active_id]
+        except Exception as exc:
+            print(f"Error loading profiles from file: {exc}")
 
     @staticmethod
     def _new_profile(
@@ -279,6 +329,7 @@ class ProfileStore:
                 self.active_id = profile_id
             if activate or self.active_id == profile_id:
                 self._active_snapshot = profile
+            self._save_to_file()
         return self.control_payload()
 
     def count(self) -> int:
@@ -292,6 +343,7 @@ class ProfileStore:
                 raise ValueError("Profile was not found.")
             self.active_id = profile_id
             self._active_snapshot = profile
+            self._save_to_file()
         return self.control_payload()
 
     def duplicate(self, profile_id: str) -> dict[str, Any]:
@@ -314,6 +366,7 @@ class ProfileStore:
             self.profiles[profile.id] = profile
             self.active_id = profile.id
             self._active_snapshot = profile
+            self._save_to_file()
         return self.control_payload()
 
     def delete(self, profile_id: str) -> dict[str, Any]:
@@ -326,6 +379,7 @@ class ProfileStore:
             if self.active_id == profile_id:
                 self.active_id = next(iter(self.profiles))
                 self._active_snapshot = self.profiles[self.active_id]
+            self._save_to_file()
         return self.control_payload()
 
     def export(self) -> dict[str, Any]:
@@ -369,6 +423,7 @@ class ProfileStore:
                 requested_active if requested_active in imported else next(iter(imported))
             )
             self._active_snapshot = self.profiles[self.active_id]
+            self._save_to_file()
         return self.control_payload()
 
 
