@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import ipaddress
+import json
+import os
 import re
 import threading
 import urllib.parse
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from certificates import secure_write
 from settings import (
     BLOCKLIST_PRESETS,
     MAX_BLOCKLIST_DOMAINS_PER_SOURCE,
@@ -128,6 +132,7 @@ class ProfileStore:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.lock = threading.RLock()
+        self.persistence_warning: str | None = None
         initial = self._new_profile(
             name="Default",
             upstreams=settings.upstreams,
@@ -148,21 +153,13 @@ class ProfileStore:
     def _save_to_file(self) -> None:
         if not self.settings.profiles_file:
             return
-        from pathlib import Path
-        import json
-        from certificates import secure_write
-        try:
-            path = Path(self.settings.profiles_file)
-            data = self.export()
-            secure_write(path, json.dumps(data, indent=2))
-        except Exception as exc:
-            print(f"Error saving profiles to file: {exc}")
+        path = Path(self.settings.profiles_file)
+        data = self.export()
+        secure_write(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
 
     def _load_from_file(self) -> None:
         if not self.settings.profiles_file:
             return
-        from pathlib import Path
-        import json
         path = Path(self.settings.profiles_file)
         if not path.is_file():
             self._save_to_file()
@@ -170,15 +167,21 @@ class ProfileStore:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             if data.get("format") != "dns-dashboard-profiles-v1":
-                return
+                raise ValueError("Unsupported stored profile format.")
             raw_profiles = data.get("profiles")
             if not isinstance(raw_profiles, list) or not raw_profiles:
-                return
+                raise ValueError("Stored profile document contains no profiles.")
+            if len(raw_profiles) > MAX_PROFILES:
+                raise ValueError(f"Stored profile document exceeds {MAX_PROFILES} profiles.")
 
             imported: dict[str, ProfileSnapshot] = {}
             for raw in raw_profiles:
+                if not isinstance(raw, dict):
+                    raise ValueError("Stored profile entries must be objects.")
                 validated = self._validate(raw)
                 profile_id = str(raw.get("id", "")).strip() or uuid.uuid4().hex[:12]
+                while profile_id in imported:
+                    profile_id = uuid.uuid4().hex[:12]
                 imported[profile_id] = self._new_profile(
                     **validated,
                     profile_id=profile_id,
@@ -191,8 +194,16 @@ class ProfileStore:
                 requested_active if requested_active in imported else next(iter(imported))
             )
             self._active_snapshot = self.profiles[self.active_id]
-        except Exception as exc:
-            print(f"Error loading profiles from file: {exc}")
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            broken = path.with_name(f"{path.stem}.broken{path.suffix}")
+            try:
+                os.replace(path, broken)
+            except OSError:
+                broken = path
+            self.persistence_warning = (
+                f"Stored profiles could not be loaded ({exc}). The invalid file was preserved at {broken}."
+            )
+            self._save_to_file()
 
     @staticmethod
     def _new_profile(
@@ -289,8 +300,11 @@ class ProfileStore:
                 for profile in self.profiles.values()
             ]
             active_id = self.active_id
+        persistent = bool(self.settings.profiles_file)
         return {
-            "runtime_only": True,
+            "runtime_only": not persistent,
+            "persistent": persistent,
+            "persistence_warning": self.persistence_warning,
             "active_profile_id": active_id,
             "profiles": profiles,
             "filter_presets": [
