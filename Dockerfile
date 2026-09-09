@@ -4,7 +4,7 @@ ARG FRP_VERSION=0.62.1
 ARG TARGETARCH
 
 LABEL org.opencontainers.image.source="https://github.com/ntun7729/Dns"
-LABEL org.opencontainers.image.description="Render-ready DNS-over-TLS dashboard with FRPC exposure"
+LABEL org.opencontainers.image.description="Dashboard-managed DNS-over-TLS service with FRPC exposure"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl openssl tar \
@@ -44,23 +44,21 @@ RUN set -eux; \
     rm -rf /tmp/frp*
 
 RUN groupadd --system --gid 10001 app \
-    && useradd --system --uid 10001 --gid app --home-dir /app --create-home app
+    && useradd --system --uid 10001 --gid app --home-dir /app --create-home app \
+    && mkdir -p /data/dns-dashboard \
+    && chown -R app:app /data
 
 WORKDIR /app
 COPY --chown=app:app app/ /app/app/
 COPY --chown=app:app scripts/entrypoint.sh /entrypoint.sh
 
+# Only process/bootstrap values live in the image environment.  DNS, FRPC,
+# profiles, filtering, TLS, and administrator settings are managed by the web UI.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     APP_ENV=production \
     PORT=10000 \
-    BIND_HOST=0.0.0.0 \
-    DOT_ENABLED=true \
-    DOT_BIND_HOST=127.0.0.1 \
-    DOT_PORT=8853 \
-    FRPC_ENABLED=true \
-    FRP_SERVER_PORT=7000 \
-    FRP_REMOTE_PORT=853
+    BIND_HOST=0.0.0.0
 
 RUN chmod 0755 /entrypoint.sh
 
