@@ -16,48 +16,81 @@ from profiles import ProfileSnapshot, ProfileStore
 
 _RESOLVER_CACHE: dict[str, tuple[list[tuple], float]] = {}
 _RESOLVER_CACHE_LOCK = threading.Lock()
-RESOLVER_CACHE_TTL = 300.0  # 5 minutes
+RESOLVER_CACHE_TTL = 300.0
 
-
-_DNS_CACHE: dict[tuple[str, bytes], tuple[bytes, float]] = {}
+# Keep the application-level DNS cache intentionally small.  It exists to absorb
+# repeat lookups, not to become an unbounded recursive-resolver cache on a small
+# container.  Profile revision is part of every key so edits never reuse answers
+# produced under old upstream/profile settings.
+MAX_DNS_CACHE_ENTRIES = 4096
+MAX_DNS_CACHE_RESPONSE_BYTES = 8192
+MAX_DNS_CACHE_TTL_SECONDS = 300.0
+MAX_INFLIGHT_QUERIES_PER_CONNECTION = 64
+_DNS_CACHE: dict[tuple[str, str, str, bytes], tuple[bytes, float]] = {}
 _DNS_CACHE_LOCK = threading.Lock()
 
 
-def get_cached_dns_response(domain: str, qtype_class: bytes, transaction_id: bytes) -> bytes | None:
-    key = (domain, qtype_class)
+def _profile_cache_key(profile: ProfileSnapshot) -> tuple[str, str]:
+    return profile.id, profile.updated_at
+
+
+def get_cached_dns_response(
+    profile: ProfileSnapshot,
+    domain: str,
+    qtype_class: bytes,
+    transaction_id: bytes,
+) -> bytes | None:
+    profile_id, profile_revision = _profile_cache_key(profile)
+    key = (profile_id, profile_revision, domain, qtype_class)
     now = time.monotonic()
     with _DNS_CACHE_LOCK:
-        if key in _DNS_CACHE:
-            response, expiry = _DNS_CACHE[key]
-            if now < expiry:
-                return transaction_id + response[2:]
-            else:
-                del _DNS_CACHE[key]
+        cached = _DNS_CACHE.get(key)
+        if cached is None:
+            return None
+        response, expiry = cached
+        if now < expiry:
+            return transaction_id + response[2:]
+        _DNS_CACHE.pop(key, None)
     return None
 
 
-def cache_dns_response(domain: str, qtype_class: bytes, response: bytes, question_end: int) -> None:
-    if len(response) < 4:
+def cache_dns_response(
+    profile: ProfileSnapshot,
+    domain: str,
+    qtype_class: bytes,
+    response: bytes,
+    question_end: int,
+) -> None:
+    if len(response) < 4 or len(response) > MAX_DNS_CACHE_RESPONSE_BYTES:
         return
     rcode = response[3] & 0x0F
-    if rcode not in (0, 3):  # Only cache NOERROR and NXDOMAIN
+    if rcode not in (0, 3):
         return
 
-    # Attempt to parse TTL from first answer record
-    ttl = 10.0  # default fallback TTL (10 seconds)
+    ttl = 10.0
     try:
-        if len(response) > question_end + 10:
-            if response[question_end] & 0xC0 == 0xC0:
-                ttl_bytes = response[question_end + 6 : question_end + 10]
-                parsed_ttl = int.from_bytes(ttl_bytes, "big")
-                if 1 <= parsed_ttl <= 86400:
-                    ttl = float(parsed_ttl)
-    except Exception:
+        if len(response) > question_end + 10 and response[question_end] & 0xC0 == 0xC0:
+            ttl_bytes = response[question_end + 6 : question_end + 10]
+            parsed_ttl = int.from_bytes(ttl_bytes, "big")
+            if parsed_ttl >= 1:
+                ttl = min(float(parsed_ttl), MAX_DNS_CACHE_TTL_SECONDS)
+    except (IndexError, ValueError):
         pass
 
-    key = (domain, qtype_class)
+    profile_id, profile_revision = _profile_cache_key(profile)
+    key = (profile_id, profile_revision, domain, qtype_class)
     now = time.monotonic()
     with _DNS_CACHE_LOCK:
+        if len(_DNS_CACHE) >= MAX_DNS_CACHE_ENTRIES:
+            for stale_key, (_payload, expiry) in tuple(_DNS_CACHE.items()):
+                if expiry <= now:
+                    _DNS_CACHE.pop(stale_key, None)
+            while len(_DNS_CACHE) >= MAX_DNS_CACHE_ENTRIES:
+                try:
+                    oldest = next(iter(_DNS_CACHE))
+                except StopIteration:
+                    break
+                _DNS_CACHE.pop(oldest, None)
         _DNS_CACHE[key] = (response, now + ttl)
 
 
@@ -80,7 +113,6 @@ def _resolve_endpoint(host: str, port: int, socktype: int) -> list[tuple]:
 
     try:
         addresses = socket.getaddrinfo(host, port, type=socktype)
-        # Prioritize IPv4 to minimize timeouts on IPv6-unfriendly networks
         addresses = sorted(addresses, key=lambda addr: 0 if addr[0] == socket.AF_INET else 1)
     except OSError as exc:
         with _RESOLVER_CACHE_LOCK:
@@ -294,10 +326,14 @@ async def handle_dot(
                 response = build_nxdomain_response(payload, question_end)
             else:
                 qtype_class = payload[question_end - 4 : question_end]
-                response = get_cached_dns_response(domain, qtype_class, payload[:2])
+                response = get_cached_dns_response(
+                    profile, domain, qtype_class, payload[:2]
+                )
                 if response is None:
                     response = await forward_dns_query(payload, profile, runtime, settings)
-                    cache_dns_response(domain, qtype_class, response, question_end)
+                    cache_dns_response(
+                        profile, domain, qtype_class, response, question_end
+                    )
         except ValueError as exc:
             runtime.record_dns_error("malformed_message", str(exc))
             response = build_formerr_response(payload, question_end)
@@ -317,7 +353,6 @@ async def handle_dot(
     try:
         while True:
             try:
-                # Set a 60-second idle timeout on reading the next DNS query header
                 header = await asyncio.wait_for(reader.readexactly(2), timeout=60.0)
             except asyncio.TimeoutError:
                 break
@@ -332,13 +367,14 @@ async def handle_dot(
                 )
                 break
             try:
-                # Set a 5-second timeout on reading the packet payload
                 payload = await asyncio.wait_for(reader.readexactly(length), timeout=5.0)
             except (asyncio.TimeoutError, asyncio.IncompleteReadError) as exc:
                 if isinstance(exc, asyncio.IncompleteReadError) and exc.partial:
                     runtime.record_unexpected_disconnect()
                 break
 
+            if len(tasks) >= MAX_INFLIGHT_QUERIES_PER_CONNECTION:
+                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             task = asyncio.create_task(process_query(payload))
             tasks.add(task)
             task.add_done_callback(tasks.discard)
@@ -365,6 +401,7 @@ async def run_dot_server(
     startup_complete: threading.Event,
 ) -> None:
     from pathlib import Path
+
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(settings.dot_cert_file, settings.dot_key_file)
@@ -379,7 +416,6 @@ async def run_dot_server(
     runtime.update(dot_state="running", dot_last_error=None)
     startup_complete.set()
 
-    # Background task to monitor certificate file changes and reload hot
     async def monitor_certificates() -> None:
         cert_path = Path(settings.dot_cert_file)
         key_path = Path(settings.dot_key_file)
@@ -391,7 +427,7 @@ async def run_dot_server(
             pass
 
         while True:
-            await asyncio.sleep(60.0)  # Check every 60 seconds
+            await asyncio.sleep(60.0)
             try:
                 if cert_path.exists() and key_path.exists():
                     current_mtime = cert_path.stat().st_mtime
@@ -402,7 +438,9 @@ async def run_dot_server(
                             runtime.update(certificate=certificate.as_public())
                             last_mtime = current_mtime
                         else:
-                            runtime.update(dot_last_error=f"Attempted cert reload failed: {certificate.error}")
+                            runtime.update(
+                                dot_last_error=f"Attempted cert reload failed: {certificate.error}"
+                            )
             except Exception as exc:
                 runtime.update(dot_last_error=f"Certificate watcher error: {exc}")
 
