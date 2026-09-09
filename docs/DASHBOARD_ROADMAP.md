@@ -1,296 +1,173 @@
-# Dashboard and Reliability Improvement Plan
+# Dashboard and Reliability Roadmap
 
-The production DNS-over-TLS path is operational. Future work should improve reliability, security, and observability without collecting queried domain names or exposing secrets.
+This document tracks work that remains after the dashboard-managed v4 refactor. The service should continue improving reliability and observability without retaining queried domain names or exposing secrets.
 
-## Completed foundation
+## Completed in the current implementation
 
-The current implementation includes:
+### Dashboard and configuration
 
-- Validated public TLS certificate handling
-- Android-compatible DNS-over-TLS
-- FRPC exposure through a public FRPS server
-- Base64 Render secrets to avoid PEM corruption
-- Certificate expiry warnings
-- Upstream latency and error telemetry
-- Active and peak client counts
+- First-run web administrator setup
+- HTTP Basic authentication after setup
+- Salted scrypt password storage
+- Dashboard-managed DoT, FRPC, TLS, resolver timing, history, and filter-update settings
+- Persistent named DNS profiles
+- Profile create/edit/activate/duplicate/delete/import/export
+- Full sensitive backup/restore for configuration, profiles, TLS, and FRP token
+- One-time migration from legacy environment variables
+- Controlled self-restart after global settings changes
+- Storage-state warning when the persistent data path is unavailable
+
+### DNS transport and reliability
+
+- Android-compatible DNS-over-TLS listener
+- Multiple queries per persistent DoT connection
+- Concurrent request handling
+- 60-second idle timeout
+- 5-second incomplete-query timeout
+- 64-query per-connection in-flight ceiling
+- Multi-upstream `primary_failover` and `round_robin`
+- Resolver cooldown/recovery
+- Per-resolver success/failure/timeout/latency telemetry
+- DNS transaction-ID and QR-bit validation
+- UDP upstream transport with TCP fallback on truncated responses
+- Hostname-resolution cache for upstream endpoints
+- Bounded DNS answer cache
+- Maximum cached-answer TTL
+- Profile-revision-scoped cache keys to prevent stale reuse after edits
+
+### TLS and FRPC
+
+- Certificate/key pair validation
+- Hostname/SAN validation
+- Validity/expiry checks
+- Dashboard TLS upload
+- Production use of dashboard-managed TLS files
+- Certificate health/expiry warnings
+- TLS file hot reload
+- Optional FRP token authentication
+- FRPC launched with a minimal non-secret environment
+- FRPC held back until DoT is ready
+
+### Filtering and privacy
+
+- HaGeZi Light preset
+- Up to five custom raw GitHub blocklist sources
+- Manual blocklist and allowlist
+- Allowlist override behavior
+- Aggregate-only history
+- No queried-domain history
+- No client-IP dashboard storage
+- Disabled dashboard request logging and FRPC stdout/stderr capture
+
+### UI and observability
+
+- Responsive multi-view dashboard
+- Overview/Analytics/Profiles/Resolvers/Settings/Diagnostics views
+- Aggregate traffic and latency charts
+- Certificate, FRPC, upstream, filtering, and DNS diagnostics
+- Active/peak connection metrics
 - DNS error classification
-- Responsive dashboard layout
-- Multi-upstream DNS with primary failover or round robin
-- Per-resolver success, failure, timeout, and latency statistics
-- Disabled HTTP access logs, FRPC output capture, and query-error printing
 
-## Phase 1 — Production hardening
+## Next priorities
 
-### 1. FRP authentication
+### 1. Public DoT self-test
 
-Add a strong FRP token on both FRPS and Render.
+Add a low-frequency background check of the externally reachable DoT endpoint:
 
-Benefits:
-
-- Prevents unauthorized FRPC clients from registering proxies
-- Reduces exposure of the public FRPS control port
-
-Implementation:
-
-- Set `auth.method = "token"` and `auth.token` on FRPS
-- Set the same secret in Render as `FRP_AUTH_TOKEN`
-- Keep the token out of GitHub
-
-### 2. Dashboard access control
-
-The dashboard exposes infrastructure addresses and operational state. Protect it before sharing its URL publicly.
-
-Preferred options:
-
-1. Cloudflare Access
-2. An external authentication proxy
-3. Application-level credentials as a fallback
-
-### 3. Automated certificate renewal
-
-Replace the manual DNS challenge with an automated Cloudflare DNS-01 flow.
-
-Target workflow:
-
-1. Certbot renews automatically on the VPS.
-2. A secure deployment hook updates Render secrets.
-3. Render redeploys.
-4. The dashboard confirms the new expiry date.
-
-Do not automate this by committing certificates or private keys.
-
-### 4. FRPS log reduction
-
-The Render client no longer captures FRPC output. Configure FRPS itself to reduce disk and CPU usage:
-
-```toml
-log.to = "/dev/null"
-log.level = "error"
+```text
+public hostname:853
 ```
 
-Alternatively, keep only error-level rotating logs for troubleshooting.
+Validate TCP reachability, TLS handshake, certificate hostname, and a real DNS query. Run infrequently (for example every five minutes) and only keep aggregate result state.
 
-## Phase 2 — DNS reliability
+### 2. Global overload protection
 
-### 1. Resolver cooldown and recovery
+The per-connection request ceiling is implemented. Add global limits for:
 
-Current failover tries configured resolvers in order. Add temporary cooldown after repeated failures:
+- Simultaneous DoT connections
+- Simultaneous upstream requests
+- Optional short burst query rate
 
-- Mark a resolver degraded after a configurable failure threshold
-- Skip it for a short cooldown period
-- Probe it periodically and restore it automatically
+Overload behavior should fail quickly and predictably rather than allowing memory/thread growth.
 
-This reduces latency when one resolver is continuously unavailable.
+### 3. Faster/alternative resolver strategies
 
-### 2. DNS response validation
+Potential optional strategies:
 
-Add deeper response checks:
+- `fastest` — prefer the lowest-latency healthy resolver using bounded rolling samples
+- `random` — distribute queries without deterministic ordering
 
-- Validate transaction ID
-- Validate QR response bit
-- Reject malformed section counts
-- Ensure the response is large enough for the DNS header
+Keep `primary_failover` as the privacy-conscious default because it avoids unnecessarily spreading every lookup across multiple providers.
 
-The current implementation already checks transaction ID and minimum header length.
+### 4. Encrypted upstream DNS
 
-### 3. TCP fallback to upstream
-
-UDP DNS responses can be truncated. Add upstream TCP fallback when the DNS `TC` flag is set.
-
-Flow:
-
-1. Send UDP query.
-2. Inspect the response flags.
-3. If truncated, repeat the query over TCP.
-4. Return the complete response to the DoT client.
-
-### 4. Resolver strategy controls
-
-Support these policies:
-
-- `primary_failover`: stable preferred resolver with automatic backup
-- `round_robin`: distribute traffic across all resolvers
-- `fastest`: periodically measure latency and prefer the fastest healthy resolver
-- `random`: privacy-oriented distribution without deterministic ordering
-
-Recommended default remains `primary_failover` because it avoids spreading every user's DNS history across multiple providers.
-
-### 5. Optional encrypted upstreams
-
-The current Render service sends normal DNS from Render to the upstream resolver. Later, support:
+Optional future transports:
 
 - DNS-over-TLS upstreams
 - DNS-over-HTTPS upstreams
 
-This encrypts the Render-to-upstream segment but increases code complexity and resource usage.
+This protects the Render-to-upstream segment but adds connection-pooling, certificate, timeout, and resource-management complexity.
 
-## Phase 3 — Monitoring without raw logs
+### 5. Automated certificate renewal integration
 
-### 1. In-memory time-series counters
+The dashboard now makes certificate replacement simple, but renewal itself is still external. A future integration could securely fetch or receive renewed material without requiring a manual paste.
 
-Add a bounded ring buffer for:
+Requirements:
 
-- Queries per minute
-- Errors per minute
-- Failovers per minute
-- Active connections
-- Resolver latency
+- Never commit private keys
+- Validate new material before activation
+- Keep the currently valid certificate on failed renewal
+- Surface last renewal attempt/result
 
-Keep a fixed maximum size to prevent unbounded memory usage.
+### 6. State-change alerts
 
-### 2. Small dashboard charts
+Optional notifications when a meaningful condition changes:
 
-Show lightweight charts for the last 30 to 60 minutes:
-
-- Query volume
-- Error rate
-- Resolver latency
-- Resolver selection
-
-Use plain browser canvas or SVG rather than a large JavaScript chart dependency.
-
-### 3. Public endpoint self-test
-
-Add a low-frequency background test of the full public path:
-
-```text
-dns.nyan.college:853
-```
-
-Validate:
-
-- TCP reachability
-- TLS handshake
-- Certificate hostname and chain
-- End-to-end DNS response
-
-Run it infrequently, such as once every five minutes, to avoid unnecessary CPU and traffic.
-
-### 4. External alerting
-
-Add optional notifications only when state changes:
-
-- Certificate near expiry
-- All upstream resolvers failed
+- Certificate approaching expiry
+- All upstream resolvers unavailable
 - FRPC exited
-- Public DoT endpoint unreachable
+- Public DoT self-test failed
 
-Possible integrations:
+Avoid notifications for healthy periodic checks.
 
-- Telegram bot
-- Discord webhook
-- Email
-- Uptime monitoring service
+### 7. Release/build identity
 
-Avoid polling or sending notifications for healthy status.
-
-## Phase 4 — Security and protocol quality
-
-### 1. Rate limiting
-
-Add per-connection and global safeguards:
-
-- Maximum concurrent connections
-- Maximum queries per connection per second
-- Query-size limits
-- Idle connection timeout
-
-This protects the service from accidental overload and simple abuse.
-
-### 2. Resource limits
-
-Add explicit Docker and application limits where supported:
-
-- Maximum worker threads
-- Maximum concurrent upstream requests
-- Bounded telemetry storage
-- Graceful overload rejection
-
-### 3. DNS protocol correctness
-
-Improve handling for:
-
-- EDNS
-- Larger DNS responses
-- Upstream TCP fallback
-- Multiple queries on persistent DoT connections
-- Timeout and cancellation propagation
-
-### 4. Privacy review
-
-Maintain these rules:
-
-- Never store queried domain names by default
-- Never expose client IP addresses in the dashboard
-- Never return secrets through `/api/status`
-- Keep telemetry aggregate-only
-- Document any future privacy-impacting option clearly
-
-## Phase 5 — Maintainability
-
-### 1. Consolidate runtime modules
-
-The enhanced runtime currently extends the stable core implementation. Once it has been proven in production, merge the enhanced functions into a single application module.
-
-Benefits:
-
-- Easier maintenance
-- Simpler testing
-- Clearer type checking
-- Less monkey-patching
-
-### 2. Configuration validation
-
-Validate all settings during startup and fail with actionable messages:
-
-- Duplicate or malformed upstreams
-- Unsupported strategy
-- Unsafe timeout values
-- Missing FRPS address
-- Conflicting TLS variables
-
-### 3. Version and release display
-
-Expose a non-secret build version:
+Expose non-secret build metadata in the dashboard:
 
 - Git commit SHA
 - Release tag
 - Build timestamp
 
-Display it in the dashboard footer to make deployments easier to identify.
+This makes deployed-version verification and rollback diagnosis easier.
 
-### 4. Expanded automated tests
+### 8. More protocol and stress tests
 
-Add tests for:
+Add automated tests for:
 
-- Real UDP resolver failover using local fake servers
-- Upstream TCP fallback
-- IPv6 resolver parsing and transport
-- High-concurrency connection handling
-- Dashboard rendering at common phone widths
-- No-log guarantees
-- Secret redaction regression
+- Local fake UDP/TCP resolvers and actual failover
+- TCP fallback transport
+- IPv4/IPv6 transport combinations
+- Long-lived DoT connections with pipelined requests
+- Connection/in-flight overload behavior
+- Cache capacity and TTL eviction
+- Dashboard first-run/setup/settings API round trips
+- Backup/import round trips
+- Secret-redaction regressions
+- Mobile-width dashboard rendering
 
-## Recommended implementation order
+## Hosting/persistence follow-up
 
-1. FRP token authentication
-2. Resolver cooldown and recovery
-3. Upstream TCP fallback
-4. Automated certificate renewal
-5. Dashboard access control
-6. Public endpoint self-test
-7. In-memory history and lightweight charts
-8. External state-change alerts
-9. Rate limiting and concurrency limits
-10. Consolidate the enhanced runtime into the core module
+Dashboard state is file-backed under `/data/dns-dashboard`. On a host with persistent storage, mount that path or an ancestor. Render Free web services have an ephemeral filesystem and cannot attach persistent disks, so full backup/restore remains necessary there. A future optional external datastore backend could remove this limitation, but it should not make a database mandatory for normal self-hosting.
 
 ## Resource policy
 
-Every feature should be evaluated against the small Render instance budget:
+Every new feature should be evaluated against a small container budget:
 
-- Prefer counters over raw logs
-- Prefer event-driven checks over tight polling
-- Keep history bounded
-- Avoid large dependencies
-- Avoid background tasks more frequent than necessary
-- Do not perform active resolver probes for every dashboard refresh
+- Prefer bounded structures over unbounded maps/queues
+- Prefer counters over raw request logs
+- Avoid retaining domains or client addresses
+- Avoid tight background polling
+- Reuse network connections where doing so is safe
+- Apply explicit timeouts to external I/O
+- Degrade gracefully under upstream failure or overload
+- Never expose secrets through normal status/config APIs
