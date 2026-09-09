@@ -1,5 +1,5 @@
 (() => {
-  const validViews = new Set(["overview", "analytics", "profiles", "resolvers", "diagnostics"]);
+  const validViews = new Set(["overview", "analytics", "profiles", "resolvers", "settings", "diagnostics"]);
   const originalNavigate = navigate;
 
   function storedView() {
@@ -19,6 +19,18 @@
     if (options.scroll !== false) {
       window.requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0 }));
     }
+  };
+
+  frpcCopy = function dashboardFrpcCopy(data) {
+    const state = data.checks.frpc;
+    const auth = data.checks.frp_auth_mode;
+    if (state === "disabled") return "FRPC is disabled.";
+    if (state === "needs-config") return "Configure the FRPS address in Settings.";
+    if (state === "blocked") return "FRPC is blocked until DoT is ready.";
+    if (state === "running") {
+      return `FRPC is running with ${auth} authentication.${data.frpc.session_seconds == null ? "" : ` Session: ${formatUptime(data.frpc.session_seconds)}.`}`;
+    }
+    return data.frpc.last_error || `FRPC state: ${state}.`;
   };
 
   document.querySelectorAll(".nav-button").forEach((button) => {
@@ -122,9 +134,7 @@
 
       points.forEach((point, index) => {
         const value = finiteValue(point[item.key]);
-        if (value === null) {
-          return;
-        }
+        if (value === null) return;
         const x = padding.left + (index / (count - 1)) * plotWidth;
         const y = padding.top + plotHeight - (value / maxValue) * plotHeight;
         pathPoints.push({ x, y });
@@ -140,38 +150,33 @@
       if (pathPoints.length > 1) {
         ctx.beginPath();
         ctx.moveTo(pathPoints[0].x, padding.top + plotHeight);
-        pathPoints.forEach(pt => {
-          ctx.lineTo(pt.x, pt.y);
-        });
+        pathPoints.forEach((point) => ctx.lineTo(point.x, point.y));
         ctx.lineTo(pathPoints[pathPoints.length - 1].x, padding.top + plotHeight);
         ctx.closePath();
 
-        const grad = ctx.createLinearGradient(0, padding.top, 0, padding.top + plotHeight);
+        const gradient = ctx.createLinearGradient(0, padding.top, 0, padding.top + plotHeight);
         const baseColor = item.color;
         let rgbaStart = "rgba(59, 130, 246, 0.12)";
         let rgbaEnd = "rgba(59, 130, 246, 0.0)";
         if (baseColor.startsWith("#")) {
-          const r = parseInt(baseColor.slice(1, 3), 16);
-          const g = parseInt(baseColor.slice(3, 5), 16);
-          const b = parseInt(baseColor.slice(5, 7), 16);
-          rgbaStart = `rgba(${r}, ${g}, ${b}, 0.12)`;
-          rgbaEnd = `rgba(${r}, ${g}, ${b}, 0.0)`;
-        } else if (baseColor === "var(--blue)" || baseColor.includes("--blue")) {
-          rgbaStart = "rgba(59, 130, 246, 0.12)";
-          rgbaEnd = "rgba(59, 130, 246, 0.0)";
-        } else if (baseColor === "var(--amber)" || baseColor.includes("--amber")) {
+          const red = parseInt(baseColor.slice(1, 3), 16);
+          const green = parseInt(baseColor.slice(3, 5), 16);
+          const blue = parseInt(baseColor.slice(5, 7), 16);
+          rgbaStart = `rgba(${red}, ${green}, ${blue}, 0.12)`;
+          rgbaEnd = `rgba(${red}, ${green}, ${blue}, 0.0)`;
+        } else if (baseColor.includes("--amber")) {
           rgbaStart = "rgba(245, 158, 11, 0.12)";
           rgbaEnd = "rgba(245, 158, 11, 0.0)";
-        } else if (baseColor === "var(--red)" || baseColor.includes("--red")) {
+        } else if (baseColor.includes("--red")) {
           rgbaStart = "rgba(239, 68, 68, 0.12)";
           rgbaEnd = "rgba(239, 68, 68, 0.0)";
-        } else if (baseColor === "var(--green)" || baseColor.includes("--green")) {
+        } else if (baseColor.includes("--green")) {
           rgbaStart = "rgba(16, 185, 129, 0.12)";
           rgbaEnd = "rgba(16, 185, 129, 0.0)";
         }
-        grad.addColorStop(0, rgbaStart);
-        grad.addColorStop(1, rgbaEnd);
-        ctx.fillStyle = grad;
+        gradient.addColorStop(0, rgbaStart);
+        gradient.addColorStop(1, rgbaEnd);
+        ctx.fillStyle = gradient;
         ctx.fill();
       }
     }
