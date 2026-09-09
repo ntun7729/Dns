@@ -15,10 +15,18 @@ os.environ.setdefault("DOT_ENABLED", "false")
 os.environ.setdefault("FRPC_ENABLED", "false")
 
 from certificates import validate_certificate_files
-from dns_service import build_formerr_response, build_servfail_response, parse_dns_question
+from dns_service import (
+    build_formerr_response,
+    build_nxdomain_response,
+    build_servfail_response,
+    cache_dns_response,
+    get_cached_dns_response,
+    parse_dns_question,
+)
 from filtering import BlocklistManager
 from frpc_service import frpc_child_environment
 from profiles import ProfileStore, parse_blocklist_text, validate_raw_github_url
+from runtime_config import RuntimeConfigStore
 from settings import Settings, UpstreamEndpoint, parse_upstream_servers
 from status_api import readiness_payload, status_payload
 from telemetry import History, RuntimeState
@@ -126,6 +134,39 @@ class RefactorTests(unittest.TestCase):
             self.assertTrue(int.from_bytes(response[2:4], "big") & 0x8000)
             self.assertEqual(int.from_bytes(response[2:4], "big") & 0xF, rcode)
 
+    def test_dns_cache_is_scoped_to_profile_revision(self) -> None:
+        query = dns_query("cache-revision.example")
+        domain, question_end = parse_dns_question(query)
+        qtype_class = query[question_end - 4 : question_end]
+        original_profile = self.profiles.active()
+        response = build_nxdomain_response(query, question_end)
+        cache_dns_response(
+            original_profile, domain, qtype_class, response, question_end
+        )
+        cached = get_cached_dns_response(
+            original_profile, domain, qtype_class, b"\xaa\xbb"
+        )
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached[:2], b"\xaa\xbb")
+
+        self.profiles.save({
+            "id": original_profile.id,
+            "name": "Changed revision",
+            "upstream_servers": "1.1.1.1:53",
+            "upstream_strategy": "primary_failover",
+            "filter_enabled": False,
+            "filter_preset": "off",
+            "manual_block_domains": "",
+            "allow_domains": "",
+            "custom_blocklist_urls": "",
+            "activate": True,
+        })
+        self.assertIsNone(
+            get_cached_dns_response(
+                self.profiles.active(), domain, qtype_class, b"\xcc\xdd"
+            )
+        )
+
     def test_blocklist_parser_handles_hosts_and_inline_comments(self) -> None:
         parsed = parse_blocklist_text(
             "0.0.0.0 ads.example.com # comment\n||tracker.example.org^\nplain.example.net\n"
@@ -162,6 +203,60 @@ class RefactorTests(unittest.TestCase):
         })
         self.assertEqual(self.profiles.active().name, "Edited")
 
+    def test_dashboard_config_persists_and_hides_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "dashboard-data"
+            settings = Settings(
+                dot_enabled=False,
+                frpc_enabled=False,
+                upstreams=(UpstreamEndpoint("1.1.1.1", 53),),
+            )
+            store = RuntimeConfigStore(root)
+            store.load_into(settings)
+            self.assertTrue(store.public_payload(settings)["setup_required"])
+            self.assertEqual(Path(settings.profiles_file).parent, root)
+
+            store.set_credentials(settings, "admin", "strong-pass-123")
+            self.assertTrue(store.verify("admin", "strong-pass-123"))
+            self.assertFalse(store.verify("admin", "wrong-password"))
+            store.update_settings(settings, {
+                "frpc_enabled": True,
+                "frp_server_addr": "203.0.113.10",
+                "frp_server_port": 7000,
+                "frp_remote_port": 853,
+                "frp_auth_token": "secret-token",
+                "dot_public_hostname": "dns.example.com",
+                "history_minutes": 180,
+            })
+            public = store.public_payload(settings)
+            self.assertEqual(public["settings"]["frp_server_addr"], "203.0.113.10")
+            self.assertEqual(public["settings"]["history_minutes"], 180)
+            self.assertTrue(public["secrets"]["frp_auth_token_configured"])
+            self.assertNotIn("frp_auth_token", public["settings"])
+            self.assertNotIn("secret-token", str(public))
+
+            reloaded = Settings(
+                dot_enabled=False,
+                frpc_enabled=False,
+                upstreams=(UpstreamEndpoint("1.1.1.1", 53),),
+            )
+            RuntimeConfigStore(root).load_into(reloaded)
+            self.assertEqual(reloaded.frp_server_addr, "203.0.113.10")
+            self.assertEqual(reloaded.frp_auth_token, "secret-token")
+            self.assertEqual(reloaded.dot_public_hostname, "dns.example.com")
+
+    def test_short_legacy_dashboard_password_migrates_without_lockout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Settings(
+                dashboard_username="legacy",
+                dashboard_password="short",
+                dot_enabled=False,
+                frpc_enabled=False,
+            )
+            store = RuntimeConfigStore(Path(directory) / "data")
+            store.load_into(settings)
+            self.assertTrue(store.verify("legacy", "short"))
+
     def test_health_status_and_static_routes_are_safe(self) -> None:
         self.runtime.update(dot_state="disabled", frpc_state="disabled")
         self.assertTrue(readiness_payload(self.settings, self.runtime)["ready"])
@@ -173,6 +268,7 @@ class RefactorTests(unittest.TestCase):
             self.settings, self.runtime, self.profiles, self.blocklists
         )
         self.assertIn("/app.js", handler.static_routes)
+        self.assertIn("/settings.js", handler.static_routes)
         self.assertNotIn("/api/status", handler.static_routes)
 
     def test_matching_certificate_and_key_validate(self) -> None:
