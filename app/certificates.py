@@ -262,14 +262,15 @@ def prepare_tls_material(settings: Settings, *, now: float | None = None) -> Cer
                 error=f"TLS files could not be written securely: {exc}",
             )
         source = "environment"
+    elif cert_path.exists() and key_path.exists():
+        # Dashboard-managed certificate files are the normal production path.
+        source = "dashboard"
     elif settings.production:
         return CertificateStatus(
             source="missing",
             configured=False,
-            error="Production requires DOT_CERT_PEM and DOT_KEY_PEM.",
+            error="Upload a TLS certificate and private key from Dashboard > Settings.",
         )
-    elif cert_path.exists() and key_path.exists():
-        source = "file"
     else:
         try:
             generate_development_certificate(settings)
