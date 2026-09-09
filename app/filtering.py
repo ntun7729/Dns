@@ -67,6 +67,17 @@ class BlocklistManager:
                 urls.append(url)
         return tuple(urls)
 
+    def _prune_caches(self, profile: ProfileSnapshot) -> None:
+        active_urls = set(self._source_urls(profile)) if profile.filter_enabled else set()
+        with self.lock:
+            stale_urls = [
+                url
+                for url, cache in self.caches.items()
+                if url not in active_urls and not cache.get("loading")
+            ]
+            for url in stale_urls:
+                self.caches.pop(url, None)
+
     def _is_stale(self, cache: Mapping[str, Any]) -> bool:
         age = time.time() - float(cache.get("last_updated_epoch", 0.0))
         return not cache.get("domains") or age >= self.settings.filter_update_hours * 3600
@@ -80,7 +91,7 @@ class BlocklistManager:
         )
         request = urllib.request.Request(
             url,
-            headers={"User-Agent": "DNS-Dashboard/3.0 blocklist updater"},
+            headers={"User-Agent": "DNS-Dashboard/4.0 blocklist updater"},
         )
         with urllib.request.urlopen(request, timeout=30) as response:
             content_length = response.headers.get("Content-Length")
@@ -139,6 +150,7 @@ class BlocklistManager:
         threading.Thread(target=worker, daemon=True).start()
 
     def refresh_profile(self, profile: ProfileSnapshot, *, force: bool = False) -> None:
+        self._prune_caches(profile)
         if not profile.filter_enabled:
             return
         for url in self._source_urls(profile):
