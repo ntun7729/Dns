@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>DNS Dashboard</title>
     <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/settings.css">
   </head>
   <body>
     <div class="app-frame">
@@ -16,6 +17,7 @@
           <button class="nav-button" data-view="analytics" type="button">Analytics</button>
           <button class="nav-button" data-view="profiles" type="button">Profiles</button>
           <button class="nav-button" data-view="resolvers" type="button">Resolvers</button>
+          <button class="nav-button" data-view="settings" type="button">Settings</button>
           <button class="nav-button" data-view="diagnostics" type="button">Diagnostics</button>
         </nav>
         <div class="sidebar-status"><span id="sidebarStatusDot" class="dot neutral"></span><div><strong id="sidebarStatusText">Checking</strong><small id="sidebarProfile">Default profile</small></div></div>
@@ -24,7 +26,7 @@
 
       <main class="content-shell">
         <header class="topbar">
-          <div><p class="eyebrow">Render DNS-over-TLS operations</p><h1 id="pageTitle">Overview</h1></div>
+          <div><p class="eyebrow">DNS-over-TLS operations</p><h1 id="pageTitle">Overview</h1></div>
           <div class="hero-actions"><span class="updated" id="lastUpdated">Waiting for data</span><div class="status-pill" id="overallStatus">Checking</div></div>
         </header>
 
@@ -91,7 +93,7 @@
 
         <section class="view" data-view-panel="profiles">
           <section class="panel controls-panel" id="controlsPanel" hidden>
-            <div class="panel-head"><div><p class="eyebrow">Local profile manager</p><h2>DNS controls</h2><p class="section-copy">Changes apply immediately but remain in memory until restart. Export profiles after important changes.</p></div><span class="mini-pill warn">Runtime-only</span></div>
+            <div class="panel-head"><div><p class="eyebrow">Persistent profile manager</p><h2>DNS controls</h2><p class="section-copy">Profiles are saved automatically to dashboard storage and apply immediately.</p></div><span class="mini-pill">Persistent</span></div>
             <div class="profile-toolbar"><label><span>Profile</span><select id="profileSelect"></select></label><button id="activateProfileButton" type="button">Activate</button><button id="newProfileButton" type="button" class="secondary">New</button><button id="duplicateProfileButton" type="button" class="secondary">Duplicate</button><button id="deleteProfileButton" type="button" class="danger">Delete</button></div>
             <form id="profileForm" class="control-form">
               <input id="profileId" type="hidden">
@@ -107,11 +109,94 @@
             </form>
             <p class="control-message" id="controlMessage"></p>
           </section>
-          <section class="panel" id="controlsUnavailable"><p class="eyebrow">Profile manager</p><h2>Controls unavailable</h2><p class="section-copy">Configure dashboard username and password to enable profile controls.</p></section>
+          <section class="panel" id="controlsUnavailable"><p class="eyebrow">Profile manager</p><h2>Controls unavailable</h2><p class="section-copy">Open Settings and create the dashboard administrator to enable profile controls.</p></section>
         </section>
 
         <section class="view" data-view-panel="resolvers">
           <section class="panel resolver-panel"><div class="panel-head"><div><p class="eyebrow">Upstream pool</p><h2>Resolver health</h2></div><span class="mini-pill" id="upstreamPoolStatus">Waiting</span></div><div class="resolver-grid" id="resolverGrid"><p class="empty">Waiting for resolver data.</p></div></section>
+        </section>
+
+        <section class="view" data-view-panel="settings">
+          <section class="panel setup-card" id="settingsSetupPanel" hidden>
+            <p class="eyebrow">First-run setup</p><h2>Create dashboard administrator</h2>
+            <p class="section-copy">No Docker environment variable is required. Create the administrator here, then use this Settings page for service configuration.</p>
+            <p class="setup-warning">Configure this immediately before sharing the dashboard URL. Until an administrator exists, the first-run setup endpoint is intentionally available so the owner can claim the dashboard.</p>
+            <form id="setupForm" class="setup-form">
+              <label><span>Username</span><input id="setupUsername" autocomplete="username" maxlength="64" required></label>
+              <label><span>Password</span><input id="setupPassword" type="password" autocomplete="new-password" minlength="10" maxlength="256" required></label>
+              <label><span>Confirm password</span><input id="setupPasswordConfirm" type="password" autocomplete="new-password" minlength="10" maxlength="256" required></label>
+              <div><button type="submit">Create administrator</button></div>
+            </form>
+            <p class="control-message" id="setupMessage"></p>
+          </section>
+
+          <section class="panel" id="settingsPanel" hidden>
+            <div class="panel-head"><div><p class="eyebrow">Persistent configuration</p><h2>Service settings</h2><p class="section-copy">Edit operational settings here. Saving restarts the process automatically so listener, FRPC, history, and certificate changes take effect.</p></div><span class="mini-pill">Dashboard managed</span></div>
+            <form id="settingsForm">
+              <div class="settings-grid">
+                <section class="settings-section">
+                  <h3>DNS-over-TLS</h3><p>Listener identity and public Android Private DNS hostname.</p>
+                  <div class="settings-form-grid">
+                    <label class="wide"><span>Service name</span><input id="serviceName" maxlength="80" required></label>
+                    <label class="settings-toggle"><input id="settingsDotEnabled" type="checkbox"><span>Enable DoT listener</span></label>
+                    <label><span>Local bind IP</span><input id="settingsDotBindHost" inputmode="decimal" placeholder="127.0.0.1" required><small>Loopback only for safety.</small></label>
+                    <label><span>Local DoT port</span><input id="settingsDotPort" type="number" min="1" max="65535" required></label>
+                    <label class="wide"><span>Private DNS hostname</span><input id="settingsPublicHostname" placeholder="dns.example.com" autocomplete="off"></label>
+                  </div>
+                </section>
+
+                <section class="settings-section">
+                  <h3>FRPC tunnel</h3><p>Expose the local DoT listener through your FRPS server.</p>
+                  <div class="settings-form-grid">
+                    <label class="settings-toggle"><input id="settingsFrpcEnabled" type="checkbox"><span>Enable FRPC</span></label>
+                    <label><span>FRPS address</span><input id="settingsFrpServerAddr" placeholder="203.0.113.10" autocomplete="off"></label>
+                    <label><span>FRPS control port</span><input id="settingsFrpServerPort" type="number" min="1" max="65535"></label>
+                    <label><span>Public DoT port</span><input id="settingsFrpRemotePort" type="number" min="1" max="65535"></label>
+                    <label class="wide"><span>FRP authentication token</span><input id="settingsFrpAuthToken" type="password" autocomplete="new-password" placeholder="Leave blank to keep current token"><small id="frpTokenState" class="secret-state"></small></label>
+                    <label class="settings-toggle wide"><input id="clearFrpAuthToken" type="checkbox"><span>Remove stored FRP token</span></label>
+                  </div>
+                </section>
+
+                <section class="settings-section">
+                  <h3>Resolver behavior</h3><p>Global timeout and cooldown behavior. Resolver addresses and strategy stay profile-specific.</p>
+                  <div class="settings-form-grid">
+                    <label><span>Upstream timeout (seconds)</span><input id="settingsUpstreamTimeout" type="number" min="0.2" max="30" step="0.1"></label>
+                    <label><span>Base cooldown (seconds)</span><input id="settingsCooldown" type="number" min="0" max="600" step="0.1"></label>
+                    <label><span>Maximum cooldown (seconds)</span><input id="settingsCooldownMax" type="number" min="1" max="3600" step="0.1"></label>
+                    <label><span>History window (minutes)</span><input id="settingsHistoryMinutes" type="number" min="15" max="1440"></label>
+                    <label><span>Blocklist refresh interval (hours)</span><input id="settingsFilterUpdateHours" type="number" min="1" max="168"></label>
+                  </div>
+                </section>
+
+                <section class="settings-section">
+                  <h3>TLS certificate</h3><p>Paste a matching PEM certificate chain and private key. They are validated before replacing the active files.</p>
+                  <div class="settings-form-grid">
+                    <label class="wide"><span>Certificate / full chain PEM</span><textarea id="settingsTlsCertificate" autocomplete="off" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----"></textarea></label>
+                    <label class="wide"><span>Private key PEM</span><textarea id="settingsTlsPrivateKey" autocomplete="off" spellcheck="false" placeholder="-----BEGIN PRIVATE KEY-----"></textarea></label>
+                    <small id="tlsState" class="secret-state wide"></small>
+                  </div>
+                </section>
+
+                <section class="settings-section">
+                  <h3>Administrator</h3><p>Change dashboard credentials. Passwords are stored as a salted scrypt hash, not plaintext.</p>
+                  <div class="settings-form-grid">
+                    <label><span>Username</span><input id="settingsAdminUsername" maxlength="64" autocomplete="username"></label>
+                    <label><span>New password</span><input id="settingsAdminPassword" type="password" minlength="10" maxlength="256" autocomplete="new-password" placeholder="Leave blank to keep current password"></label>
+                  </div>
+                </section>
+
+                <section class="settings-section">
+                  <h3>Backup and restore</h3><p>Export configuration, profiles, TLS material, and FRP token as one JSON backup.</p>
+                  <div class="settings-actions"><button id="exportBackupButton" type="button" class="secondary">Export full backup</button><label class="file-button secondary">Import full backup<input id="importBackupInput" type="file" accept="application/json,.json"></label></div>
+                  <p class="backup-warning">Full backups contain sensitive TLS private-key and FRP-token material. Protect them like credentials.</p>
+                </section>
+              </div>
+              <div class="settings-actions"><button id="saveSettingsButton" type="submit">Save settings and restart</button></div>
+              <p class="settings-restart-note">Profile edits do not require a restart. Global listener/FRPC settings do.</p>
+              <p id="configStorageNote" class="storage-note"></p>
+              <p class="control-message" id="settingsMessage"></p>
+            </form>
+          </section>
         </section>
 
         <section class="view" data-view-panel="diagnostics">
@@ -124,5 +209,6 @@
     </div>
     <script src="/app.js"></script>
     <script src="/ui_fixes.js"></script>
+    <script src="/settings.js"></script>
   </body>
 </html>
