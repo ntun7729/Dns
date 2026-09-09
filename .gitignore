@@ -7,3 +7,6 @@ __pycache__/
 *.crt
 output/
 memory/
+data/
+*.broken.json
+dns-dashboard-backup-*.json
