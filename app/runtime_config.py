@@ -41,11 +41,13 @@ _EDITABLE_FIELDS = (
 )
 
 
-def _password_hash(password: str) -> str:
-    if not PASSWORD_MIN_LENGTH <= len(password) <= PASSWORD_MAX_LENGTH:
+def _password_hash(password: str, *, enforce_policy: bool = True) -> str:
+    if enforce_policy and not PASSWORD_MIN_LENGTH <= len(password) <= PASSWORD_MAX_LENGTH:
         raise ValueError(
             f"Dashboard password must be {PASSWORD_MIN_LENGTH}-{PASSWORD_MAX_LENGTH} characters."
         )
+    if not password or len(password) > PASSWORD_MAX_LENGTH:
+        raise ValueError("Dashboard password is invalid.")
     salt = os.urandom(16)
     n, r, p = 16384, 8, 1
     derived = hashlib.scrypt(
@@ -201,9 +203,13 @@ class RuntimeConfigStore:
         username = settings.dashboard_username.strip()
         password = settings.dashboard_password
         auth: dict[str, Any] = {"username": "", "password_hash": ""}
-        if username and password:
-            if _USERNAME_RE.fullmatch(username):
-                auth = {"username": username, "password_hash": _password_hash(password)}
+        if username and password and _USERNAME_RE.fullmatch(username):
+            # Preserve an existing deployment even when its legacy password does
+            # not meet the stronger policy required for newly created passwords.
+            auth = {
+                "username": username,
+                "password_hash": _password_hash(password, enforce_policy=False),
+            }
         return {
             "format": CONFIG_FORMAT,
             "updated_at": now_iso(),
@@ -244,8 +250,6 @@ class RuntimeConfigStore:
             str(auth.get("password_hash", "")) if isinstance(auth, Mapping) else ""
         )
         object.__setattr__(settings, "dashboard_username", username)
-        # Keep plaintext credentials out of process state after migration.  A non-empty
-        # marker preserves the existing Settings.auth_enabled property.
         object.__setattr__(
             settings,
             "dashboard_password",
