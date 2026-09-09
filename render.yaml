@@ -5,49 +5,9 @@ services:
     autoDeploy: true
     healthCheckPath: /healthz
     envVars:
+      # Process bootstrap only. Operational DNS/FRPC/TLS/auth settings are
+      # created and edited from the web dashboard.
       - key: APP_ENV
         value: "production"
       - key: PORT
         value: "10000"
-      - key: DASHBOARD_USERNAME
-        sync: false
-      - key: DASHBOARD_PASSWORD
-        sync: false
-      - key: HISTORY_MINUTES
-        value: "120"
-      - key: FILTER_ENABLED
-        value: "false"
-      - key: BLOCKLIST_PRESET
-        value: "hagezi_light"
-      - key: FILTER_UPDATE_HOURS
-        value: "24"
-      - key: DOT_ENABLED
-        value: "true"
-      - key: DOT_BIND_HOST
-        value: "127.0.0.1"
-      - key: DOT_PORT
-        value: "8853"
-      - key: DOT_PUBLIC_HOSTNAME
-        value: "dns.nyan.college"
-      - key: DOT_CERT_B64
-        sync: false
-      - key: DOT_KEY_B64
-        sync: false
-      - key: FRPC_ENABLED
-        value: "true"
-      - key: FRP_SERVER_ADDR
-        sync: false
-      - key: FRP_SERVER_PORT
-        value: "7000"
-      - key: FRP_REMOTE_PORT
-        value: "853"
-      - key: UPSTREAM_DNS_SERVERS
-        value: "1.1.1.1:53,9.9.9.9:53,8.8.8.8:53"
-      - key: UPSTREAM_STRATEGY
-        value: "primary_failover"
-      - key: UPSTREAM_TIMEOUT_SECONDS
-        value: "2.0"
-      - key: RESOLVER_COOLDOWN_SECONDS
-        value: "15"
-      - key: RESOLVER_COOLDOWN_MAX_SECONDS
-        value: "120"
