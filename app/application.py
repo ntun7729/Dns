@@ -3,10 +3,15 @@
 
 from __future__ import annotations
 
+import os
 import signal
+import sys
+import threading
+import time
+from pathlib import Path
 from typing import Any
 
-from certificates import validate_certificate_files
+from certificates import normalize_pem, secure_write, validate_certificate_files
 from dns_service import (
     build_formerr_response,
     build_nxdomain_response,
@@ -18,17 +23,52 @@ from dns_service import (
 from filtering import BlocklistManager
 import frpc_service
 from profiles import ProfileStore, parse_blocklist_text, validate_raw_github_url
+from runtime_config import RuntimeConfigStore
 from settings import Settings, UpstreamEndpoint, parse_upstream_servers
 from telemetry import History, RuntimeState
 from web_app import build_handler, run_http
 
 SETTINGS = Settings.from_env()
+_LEGACY_CERT_PEM = SETTINGS.dot_cert_pem
+_LEGACY_KEY_PEM = SETTINGS.dot_key_pem
+CONFIG = RuntimeConfigStore()
+CONFIG.load_into(SETTINGS)
+
+# One-time compatibility migration for deployments that previously supplied TLS
+# material through Docker/Render environment variables.  Future edits are made
+# in the web dashboard and stored under the dashboard data directory.
+if _LEGACY_CERT_PEM and _LEGACY_KEY_PEM:
+    cert_path = Path(SETTINGS.dot_cert_file)
+    key_path = Path(SETTINGS.dot_key_file)
+    if not cert_path.is_file() or not key_path.is_file():
+        secure_write(cert_path, normalize_pem(_LEGACY_CERT_PEM))
+        secure_write(key_path, normalize_pem(_LEGACY_KEY_PEM))
+
 HISTORY = History(SETTINGS.history_minutes)
 RUNTIME = RuntimeState(HISTORY)
 PROFILES = ProfileStore(SETTINGS)
 BLOCKLISTS = BlocklistManager(SETTINGS, PROFILES, RUNTIME)
 RUNTIME.ensure_upstreams(SETTINGS.upstreams)
-DashboardHandler = build_handler(SETTINGS, RUNTIME, PROFILES, BLOCKLISTS)
+
+
+def schedule_restart() -> None:
+    """Replace this process after the current HTTP response has been flushed."""
+
+    def restart() -> None:
+        time.sleep(0.8)
+        os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve())])
+
+    threading.Thread(target=restart, name="dashboard-restart", daemon=True).start()
+
+
+DashboardHandler = build_handler(
+    SETTINGS,
+    RUNTIME,
+    PROFILES,
+    BLOCKLISTS,
+    config_store=CONFIG,
+    restart_callback=schedule_restart,
+)
 
 
 def start_frpc(settings: Settings):
@@ -52,7 +92,14 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
-    run_http(SETTINGS, RUNTIME, PROFILES, BLOCKLISTS)
+    run_http(
+        SETTINGS,
+        RUNTIME,
+        PROFILES,
+        BLOCKLISTS,
+        config_store=CONFIG,
+        restart_callback=schedule_restart,
+    )
 
 
 if __name__ == "__main__":
