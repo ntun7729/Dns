@@ -209,6 +209,9 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        # Environment parsing remains as a one-time compatibility migration for
+        # existing deployments. RuntimeConfigStore becomes authoritative once its
+        # dashboard-managed config.json exists.
         fallback_host = os.getenv("UPSTREAM_DNS", "1.1.1.1").strip() or "1.1.1.1"
         fallback_port = env_int("UPSTREAM_DNS_PORT", 53)
         try:
@@ -325,13 +328,9 @@ class Settings:
             "upstream_timeout_seconds": self.upstream_timeout_seconds,
             "resolver_cooldown_seconds": self.resolver_cooldown_seconds,
             "history_minutes": self.history_minutes,
-            "runtime_controls": "memory-only",
+            "runtime_controls": "dashboard-managed",
             "runtime_logging": "disabled",
-            "tls_secret_format": (
-                "base64"
-                if os.getenv("DOT_CERT_B64") and os.getenv("DOT_KEY_B64")
-                else "pem"
-            ),
+            "tls_secret_format": "dashboard-files",
         }
 
 
