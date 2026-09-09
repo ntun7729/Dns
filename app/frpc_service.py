@@ -99,7 +99,7 @@ def start_frpc(
         runtime.update(
             frpc_state="needs-config",
             frpc_running=False,
-            frpc_last_error="FRP_SERVER_ADDR is required to start FRPC.",
+            frpc_last_error="Configure the FRPS address in Dashboard > Settings.",
         )
         return None
     if settings.dot_enabled and runtime.snapshot()["dot_state"] != "running":
