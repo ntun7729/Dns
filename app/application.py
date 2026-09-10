@@ -28,15 +28,34 @@ from settings import Settings, UpstreamEndpoint, parse_upstream_servers
 from telemetry import History, RuntimeState
 from web_app import build_handler, run_http
 
+
+def dashboard_data_root() -> Path | None:
+    """Resolve persistent storage without coupling the image to one hosting provider.
+
+    DNS_DASHBOARD_DATA_DIR is an optional infrastructure-only override for hosts
+    whose persistent volume cannot be mounted at /data. Railway supplies its
+    volume mount path automatically, so no user-defined variable is needed there.
+    The RuntimeConfigStore default remains /data/dns-dashboard for plain Docker
+    and other container platforms.
+    """
+    explicit = os.getenv("DNS_DASHBOARD_DATA_DIR", "").strip()
+    if explicit:
+        return Path(explicit)
+    railway_volume = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+    if railway_volume:
+        return Path(railway_volume) / "dns-dashboard"
+    return None
+
+
 SETTINGS = Settings.from_env()
 _LEGACY_CERT_PEM = SETTINGS.dot_cert_pem
 _LEGACY_KEY_PEM = SETTINGS.dot_key_pem
-CONFIG = RuntimeConfigStore()
+CONFIG = RuntimeConfigStore(root=dashboard_data_root())
 CONFIG.load_into(SETTINGS)
 
 # One-time compatibility migration for deployments that previously supplied TLS
-# material through Docker/Render environment variables.  Future edits are made
-# in the web dashboard and stored under the dashboard data directory.
+# material through environment variables. Future operational edits are made in
+# the web dashboard and stored in the provider-neutral dashboard data directory.
 if _LEGACY_CERT_PEM and _LEGACY_KEY_PEM:
     cert_path = Path(SETTINGS.dot_cert_file)
     key_path = Path(SETTINGS.dot_key_file)
