@@ -1,10 +1,10 @@
 # DNS Dashboard
 
-A self-hosted DNS-over-TLS service with a protected operations dashboard, persistent DNS profiles, privacy-safe ad/tracker filtering, FRPC exposure, aggregate telemetry, and automatic multi-upstream failover.
+A self-hosted DNS-over-TLS service with a protected web dashboard, persistent DNS profiles, privacy-safe ad/tracker filtering, FRPC exposure, aggregate telemetry, and automatic multi-upstream failover.
 
-## v4: configure the service from the web
+## Dashboard-first configuration
 
-Operational configuration is now dashboard-managed. You no longer need to edit Docker or Render environment variables for:
+Operational configuration is managed from the web dashboard. You do **not** need to edit Docker/hosting-provider environment variables for:
 
 - Dashboard administrator credentials
 - Private DNS hostname
@@ -16,65 +16,127 @@ Operational configuration is now dashboard-managed. You no longer need to edit D
 - Blocklist refresh interval
 - Resolver profiles, strategies, filtering, manual rules, allowlists, and custom blocklist sources
 
-`render.yaml` contains only process bootstrap values. Existing deployments that already have the older environment variables are migrated into dashboard storage on the first start; after that, the saved dashboard configuration is authoritative.
+The Docker image is provider-neutral. Render, Railway, VPS Docker, Docker Compose, and other container services all run the same application image.
 
 ## First run
 
-1. Deploy the Docker image/service.
-2. Open the web dashboard.
-3. The dashboard automatically opens **Settings** when no administrator exists.
-4. Create the dashboard administrator immediately.
-5. Sign in with HTTP Basic authentication when the browser reloads.
-6. Open **Settings** and configure the DoT hostname, FRPS connection, TLS certificate/key, and global resolver behavior.
-7. Open **Profiles** and configure upstream resolvers and filtering.
-8. Click **Save settings and restart**. The application restarts itself and applies the new listener/FRPC settings.
+1. Deploy the container.
+2. Expose the HTTP dashboard port. The image defaults to `10000`; platforms such as Railway can inject `PORT` automatically.
+3. Open the web dashboard.
+4. The dashboard automatically opens **Settings** when no administrator exists.
+5. Create the dashboard administrator immediately.
+6. Sign in when the browser reloads.
+7. Configure the DoT hostname, FRPS connection, TLS certificate/key, and global resolver behavior in **Settings**.
+8. Configure upstream resolvers and filtering in **Profiles**.
+9. Click **Save settings and restart** when changing global service settings.
 
 The first-run setup endpoint is intentionally unauthenticated until an administrator is created, so claim a newly deployed dashboard before sharing its URL.
 
-## Persistent dashboard storage
+## Persistent storage
 
-Mutable configuration is written under:
+The standard persistent data location is:
 
 ```text
 /data/dns-dashboard
 ```
 
-The directory contains dashboard configuration, the scrypt password hash, profiles, TLS files, and the generated FRPC configuration. Files containing secrets are written with restrictive permissions.
+It contains dashboard configuration, the scrypt password hash, profiles, TLS files, and generated FRPC configuration. Secret files use restrictive permissions.
 
-For normal Docker use, mount a volume:
+For plain Docker:
 
 ```bash
-docker run --rm \
+docker run -d \
+  --name dns-dashboard \
+  --restart unless-stopped \
   -p 10000:10000 \
-  -v dns-dashboard-data:/data/dns-dashboard \
+  -v dns-dashboard-data:/data \
   ghcr.io/ntun7729/dns:latest
 ```
 
-If `/data/dns-dashboard` cannot be written, the service falls back to `/tmp/dns-dashboard` and shows a warning in Settings.
+Or use the included Compose file:
 
-### Render persistence
+```bash
+docker compose up -d
+```
 
-Render's normal service filesystem is ephemeral. To preserve dashboard edits across redeploys/restarts, attach a persistent disk to a paid Render web service and mount it at `/data/dns-dashboard` (or an ancestor such as `/data`).
+The container starts its entrypoint as root only long enough to create/fix ownership of its application data directory, then immediately runs the Python service as the unprivileged `app` user.
 
-Render Free web services cannot attach persistent disks and also lose local filesystem changes when they restart, redeploy, or spin down. On Free, use **Settings → Export full backup** after important changes and import that backup after storage is reset.
+### Storage path detection
 
-The full backup contains sensitive TLS private-key and FRP-token material. Store it as securely as credentials.
+The application resolves storage in this order:
+
+1. `DNS_DASHBOARD_DATA_DIR` if explicitly supplied as an infrastructure-only override.
+2. Railway's automatically supplied `RAILWAY_VOLUME_MOUNT_PATH`, with `/dns-dashboard` appended.
+3. `/data/dns-dashboard` for normal Docker and other providers.
+4. `/tmp/dns-dashboard` only if the selected persistent path cannot be written.
+
+`DNS_DASHBOARD_DATA_DIR` is not DNS/service configuration. It is only needed on a provider whose persistent disk cannot be mounted at `/data` and does not expose an automatic volume path.
+
+If Settings reports that fallback storage is being used, attach/configure a persistent volume before relying on local persistence.
+
+## Railway
+
+Railway automatically detects the root `Dockerfile`, injects the HTTP `PORT`, and exposes an attached volume's mount path to the application. The service therefore does not require Railway variables for normal DNS configuration.
+
+Recommended setup:
+
+1. Create a service from this GitHub repository.
+2. Let Railway build the root `Dockerfile`.
+3. Generate a public HTTP domain for the dashboard.
+4. Set the healthcheck path to `/healthz`.
+5. Attach a Railway Volume. `/data` is the recommended mount path, although the application also detects Railway's actual volume mount path automatically.
+6. Open the dashboard and complete configuration there.
+
+Railway volumes persist across deployments and restarts. A service using a volume can have a short redeployment interruption because Railway does not mount the same volume into two active deployments simultaneously.
+
+## Render
+
+`render.yaml` remains as an optional Render deployment definition, not as the architecture of the project.
+
+For Render:
+
+1. Deploy as a Docker web service.
+2. Use `/healthz` for the health check.
+3. Attach a persistent disk and mount it at `/data` when your Render plan supports disks.
+4. Configure DNS, FRPC, TLS, filtering, profiles, and dashboard credentials from the web dashboard.
+
+If the selected Render plan does not provide persistent disk storage, use **Settings → Export full backup** after important changes. Local filesystem state on an ephemeral service can be lost on replacement/redeploy.
+
+## Other Docker hosting services
+
+The service works on a container host when it provides:
+
+- A Linux Docker-compatible runtime
+- An HTTP port exposed to the dashboard
+- Outbound TCP access to the configured FRPS server and upstream DNS resolvers
+- A writable filesystem
+- Preferably a persistent volume mounted at `/data`
+
+No inbound public DoT port is required on the container platform when FRPC is enabled: FRPC makes an outbound connection to your public FRPS server and exposes the loopback DoT listener through that server.
+
+If a provider forces persistent storage to a different path, set only:
+
+```text
+DNS_DASHBOARD_DATA_DIR=/provider/mount/path/dns-dashboard
+```
+
+All actual DNS/service settings remain dashboard-managed.
 
 ## Architecture
 
 ```text
 Android Private DNS
-  -> dns.nyan.college:853
-  -> Cloudflare DNS-only A/AAAA record
-  -> FRPS public endpoint
-  -> FRPC tunnel
+  -> your DNS hostname:853
+  -> DNS-only A/AAAA record
+  -> public FRPS endpoint
+  -> outbound FRPC tunnel from this container
   -> local DoT listener (default 127.0.0.1:8853)
   -> active DNS profile
        -> allowlist / manual blocklist / downloaded blocklists
        -> upstream resolver pool
 ```
 
-The HTTP dashboard and DNS-over-TLS listener are separate. The web platform exposes the dashboard over HTTPS; FRPC exposes only the loopback DoT listener through the public FRPS server.
+The HTTP dashboard and DNS-over-TLS listener are separate. Your hosting platform exposes the dashboard over HTTP/HTTPS; FRPC exposes only the loopback DoT listener through the public FRPS server.
 
 ## Dashboard sections
 
@@ -84,14 +146,7 @@ Shows service readiness, DoT/FRPC/certificate state, aggregate DNS counters, fil
 
 ### Analytics
 
-Shows bounded in-memory history for:
-
-- Queries per minute
-- Blocked queries per minute
-- Errors per minute
-- Average upstream latency per minute
-
-No queried domain names or client IP addresses are retained in history.
+Shows bounded in-memory history for queries, blocked queries, errors, and upstream latency. Queried domain names and client IP addresses are not retained in history.
 
 ### Profiles
 
@@ -113,7 +168,7 @@ Shows per-upstream successes, failures, timeouts, latest/average latency, cooldo
 
 ### Settings
 
-Controls global service configuration, TLS material, FRPC, administrator credentials, and full backup/restore. Global listener/FRPC changes trigger a controlled self-restart after the HTTP response is returned.
+Controls global service configuration, TLS material, FRPC, administrator credentials, storage status, and full backup/restore. Global listener/FRPC changes trigger a controlled self-restart after the HTTP response is returned.
 
 ### Diagnostics
 
@@ -128,18 +183,17 @@ Surfaces certificate renewal, FRPC, upstream, DNS-processing, authentication, an
 - UDP upstream queries with automatic TCP retry on truncated responses
 - Multi-upstream health/cooldown/failover tracking
 - Resolver hostname cache with direct-IP bypass
-- Bounded application DNS cache (maximum 4096 entries)
+- Bounded DNS response cache (maximum 4096 entries)
 - Maximum 5-minute cached-answer lifetime
-- DNS cache scoped to profile ID and profile revision so profile edits cannot reuse stale answers
+- DNS cache scoped to profile ID and profile revision
 - Maximum 8 KiB response size for application-level caching
-- TLS certificate/key validation before dashboard upload replaces active files
-- TLS certificate file hot reload while DoT is running
+- TLS certificate/key validation before a dashboard upload replaces active files
+- TLS certificate hot reload while DoT is running
+- Inactive downloaded blocklist caches are pruned
 
-## Filtering
+## Filtering and privacy
 
-The bundled downloaded preset is **HaGeZi Light**. The active profile can also merge up to five custom HTTPS `raw.githubusercontent.com` lists.
-
-The allowlist overrides downloaded and manual block rules.
+The bundled downloaded preset is **HaGeZi Light**. The active profile can also merge up to five custom HTTPS `raw.githubusercontent.com` lists. The allowlist overrides downloaded and manual block rules.
 
 Privacy behavior:
 
@@ -150,25 +204,15 @@ Privacy behavior:
 
 ## TLS
 
-In production, upload a publicly trusted certificate chain and matching private key from **Settings → TLS certificate**. The server validates:
+In production, upload a publicly trusted certificate chain and matching private key from **Settings → TLS certificate**. The server validates PEM decoding, key matching, hostname/SAN matching, validity start, and expiry before replacing the active files.
 
-- PEM decoding
-- Certificate/private-key match
-- Hostname/SAN match against the configured Private DNS hostname
-- Not-before date
-- Expiry date
+For Android Private DNS, use a publicly trusted certificate for the exact provider hostname.
 
-Invalid uploaded TLS material does not replace the currently active certificate files.
+## Authentication and backups
 
-For Android Private DNS, use a publicly trusted certificate for the exact provider hostname. A Cloudflare Origin Certificate is not a public client-trust certificate.
+New administrator passwords are stored as salted scrypt hashes. The status/settings APIs never return the FRP token or TLS private key.
 
-## Authentication and secrets
-
-New administrator passwords must be 10–256 characters. They are stored as salted scrypt hashes; plaintext dashboard passwords are not kept in the persistent config.
-
-The status/settings APIs never return the FRP token or TLS private key. A full backup is the deliberate exception because it is intended for disaster recovery and is explicitly marked sensitive.
-
-FRPC is launched with a minimal child environment so dashboard/TLS secrets are not inherited by the FRPC process.
+**Settings → Export full backup** is the deliberate exception because it is a disaster-recovery export and can include the FRP token and TLS private key. Store that backup like a credential.
 
 ## Status and control endpoints
 
@@ -180,46 +224,30 @@ FRPC is launched with a minimal child environment so dashboard/TLS secrets are n
 | `/api/status` | Operational status/aggregate telemetry |
 | `/api/control` | Profile controls |
 | `/api/control/export` | Profile-only export |
-| `/api/settings` | Dashboard-managed service configuration (secrets redacted) |
+| `/api/settings` | Dashboard-managed service configuration; secrets redacted |
 | `/api/settings/export` | Sensitive full backup |
 | `/api/setup` | One-time administrator creation while unconfigured |
 
-Authenticated routes use HTTP Basic authentication behind the HTTPS dashboard endpoint.
+Authenticated routes use HTTP Basic authentication behind the hosting platform's HTTPS dashboard endpoint.
 
 ## Existing deployment migration
 
-The old environment-variable parser remains only as a compatibility migration path. On the first v4 start, if persistent `config.json` does not exist, the application imports the existing values into dashboard storage, including existing dashboard credentials and FRP configuration. Legacy TLS PEM/base64 values are copied into the dashboard TLS files if those files do not already exist.
+The old environment-variable parser remains as a compatibility migration path. If persistent `config.json` does not exist, the first v4 start imports existing values into dashboard storage, including existing dashboard credentials and FRP configuration. Legacy TLS PEM/base64 values are copied into dashboard TLS files if those files do not already exist.
 
-After migration, edit values from the web dashboard rather than the Docker/Render environment.
-
-## Render blueprint
-
-`render.yaml` now needs only:
-
-```yaml
-envVars:
-  - key: APP_ENV
-    value: "production"
-  - key: PORT
-    value: "10000"
-```
-
-Those are process bootstrap settings, not DNS configuration.
+After migration, edit operational values from the web dashboard instead of provider variables.
 
 ## Local development
-
-Build and run:
 
 ```bash
 docker build -t dns-dashboard .
 docker run --rm \
   -p 10000:10000 \
-  -v dns-dashboard-data:/data/dns-dashboard \
+  -v dns-dashboard-data:/data \
   -e APP_ENV=development \
   dns-dashboard
 ```
 
-Open `http://localhost:10000`. Development mode can create a short-lived self-signed certificate after a valid local hostname is configured; production should use a publicly trusted certificate uploaded through Settings.
+Open `http://localhost:10000`.
 
 ## Tests and image publication
 
@@ -228,13 +256,14 @@ python -m unittest discover -s tests -v
 node --check app/static/app.js
 node --check app/static/ui_fixes.js
 node --check app/static/settings.js
+sh -n scripts/entrypoint.sh
 ```
 
-GitHub Actions compiles the Python modules, runs unit/integration tests, validates dashboard JavaScript and the entrypoint shell script, then builds/publishes the GHCR Docker image only after the test job passes.
+GitHub Actions compiles the Python modules, runs unit/integration tests, validates dashboard JavaScript and the entrypoint, then builds/publishes the GHCR Docker image only after the test job passes.
 
 ## Documentation
 
-- [Complete deployment and operations guide](docs/DEPLOYMENT.md)
+- [Deployment and operations guide](docs/DEPLOYMENT.md)
 - [Dashboard and reliability improvement plan](docs/DASHBOARD_ROADMAP.md)
 
 Never commit certificates, private keys, FRP tokens, dashboard backup files, or other deployment secrets to GitHub.
