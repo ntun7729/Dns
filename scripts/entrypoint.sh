@@ -25,9 +25,37 @@ normalize_pem_env() {
   fi
 }
 
+resolve_data_dir() {
+  if [ -n "${DNS_DASHBOARD_DATA_DIR:-}" ]; then
+    printf '%s\n' "$DNS_DASHBOARD_DATA_DIR"
+    return
+  fi
+  if [ -n "${RAILWAY_VOLUME_MOUNT_PATH:-}" ]; then
+    printf '%s/dns-dashboard\n' "${RAILWAY_VOLUME_MOUNT_PATH%/}"
+    return
+  fi
+  printf '%s\n' '/data/dns-dashboard'
+}
+
+DATA_DIR=$(resolve_data_dir)
+export DNS_DASHBOARD_DATA_DIR="$DATA_DIR"
+
+# Container volumes are commonly mounted as root-owned directories. Start the
+# entrypoint as root, prepare only our application directory, then drop privileges
+# before launching Python. This works for plain Docker and providers such as
+# Railway without requiring a provider-specific runtime UID override.
+if [ "$(id -u)" = "0" ]; then
+  mkdir -p "$DATA_DIR"
+  chown app:app "$DATA_DIR"
+fi
+
 decode_base64_env DOT_CERT_B64 DOT_CERT_PEM
 decode_base64_env DOT_KEY_B64 DOT_KEY_PEM
 normalize_pem_env DOT_CERT_PEM
 normalize_pem_env DOT_KEY_PEM
+
+if [ "$(id -u)" = "0" ]; then
+  exec gosu app python /app/app/application.py
+fi
 
 exec python /app/app/application.py
