@@ -1,0 +1,13 @@
+services:
+  dns-dashboard:
+    build: .
+    image: ghcr.io/ntun7729/dns:latest
+    restart: unless-stopped
+    init: true
+    ports:
+      - "10000:10000"
+    volumes:
+      - dns-dashboard-data:/data
+
+volumes:
+  dns-dashboard-data:
