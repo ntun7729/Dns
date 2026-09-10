@@ -4,14 +4,14 @@ ARG FRP_VERSION=0.62.1
 ARG TARGETARCH
 
 LABEL org.opencontainers.image.source="https://github.com/ntun7729/Dns"
-LABEL org.opencontainers.image.description="Dashboard-managed DNS-over-TLS service with FRPC exposure"
+LABEL org.opencontainers.image.description="Provider-neutral dashboard-managed DNS-over-TLS service with FRPC exposure"
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl openssl tar \
+    && apt-get install -y --no-install-recommends ca-certificates curl gosu openssl tar \
     && rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
-    arch="${TARGETARCH:-amd64}"; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
     case "$arch" in \
       amd64) frp_arch="amd64" ;; \
       arm64) frp_arch="arm64" ;; \
@@ -50,10 +50,11 @@ RUN groupadd --system --gid 10001 app \
 
 WORKDIR /app
 COPY --chown=app:app app/ /app/app/
-COPY --chown=app:app scripts/entrypoint.sh /entrypoint.sh
+COPY scripts/entrypoint.sh /entrypoint.sh
 
-# Only process/bootstrap values live in the image environment.  DNS, FRPC,
+# Only process/bootstrap values live in the image environment. DNS, FRPC,
 # profiles, filtering, TLS, and administrator settings are managed by the web UI.
+# Hosting platforms may inject PORT automatically; the application honors it.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     APP_ENV=production \
@@ -62,7 +63,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN chmod 0755 /entrypoint.sh
 
-USER app
+# The entrypoint begins as root only to prepare a potentially root-owned mounted
+# volume, then immediately drops to uid/gid 10001 with gosu before Python starts.
 EXPOSE 10000
 STOPSIGNAL SIGTERM
 
