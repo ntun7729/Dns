@@ -1,45 +1,178 @@
 # Deployment and Operations Guide
 
-This guide covers the dashboard-managed v4 deployment: Render hosts the HTTPS operations UI and local DoT listener, while FRPC forwards public DNS-over-TLS traffic through a VPS running FRPS.
+This project is a provider-neutral Docker service. The same image can run on Railway, Render, a VPS, Docker Compose, or another container platform. Hosting providers expose the HTTPS dashboard; FRPC makes an outbound connection to your public FRPS server and exposes the local DNS-over-TLS listener.
 
 ## 1. Network design
 
 ```text
-Android Private DNS
-  -> dns.nyan.college:853
-  -> Cloudflare DNS-only record
-  -> FRPS server 152.42.239.169:853
-  -> FRPC control connection to 152.42.239.169:7000
-  -> Render container 127.0.0.1:8853
+Android / DoT client
+  -> dns.example.com:853
+  -> DNS-only A/AAAA record
+  -> public FRPS server:853
+  -> FRPC outbound tunnel from the Docker container
+  -> container loopback DoT listener (default 127.0.0.1:8853)
   -> active DNS profile
   -> configured upstream resolvers
 ```
 
-The web dashboard and DNS-over-TLS transport are separate. Render exposes HTTP/HTTPS for the dashboard; FRPC exposes the local loopback DoT listener.
+The web dashboard and DoT transport are separate. Your hosting service only needs to expose the HTTP dashboard. The container does not need a public inbound port for DoT when FRPC is used.
 
-## 2. Infrastructure
+## 2. What the host must provide
 
-You need:
+Required:
 
-- This GitHub repository
-- A Render Docker web service
-- A public VPS running FRPS
-- A DNS hostname pointing to the FRPS VPS
-- A publicly trusted TLS certificate for the Private DNS hostname
-- A DoT client such as Android Private DNS
+- Docker-compatible Linux container runtime
+- Public HTTP/HTTPS access to the dashboard
+- Outbound TCP connectivity to the FRPS server
+- Outbound DNS connectivity to configured upstream resolvers
+- Writable runtime filesystem
 
-Current example values:
+Recommended:
 
-| Setting | Value |
-| --- | --- |
-| Private DNS hostname | `dns.nyan.college` |
-| FRPS public IP | `152.42.239.169` |
-| FRPS control port | `7000` |
-| Public DoT port | `853` |
-| Render HTTP port | `10000` |
-| Render local DoT port | `8853` |
+- Persistent volume/disk mounted at `/data`
+- HTTP health check on `/healthz`
+- Automatic container restart after unexpected failure
 
-## 3. Configure FRPS
+All DNS, FRPC, TLS, filtering, profile, and administrator configuration is performed from the web dashboard.
+
+## 3. Persistent data model
+
+The normal data location is:
+
+```text
+/data/dns-dashboard
+```
+
+Files include:
+
+- `config.json` — global settings and administrator password hash
+- `profiles.json` — resolver/filter profiles
+- `tls.crt` — uploaded certificate chain
+- `tls.key` — uploaded private key
+- `frpc.toml` — generated FRPC client configuration
+
+Storage resolution order:
+
+1. `DNS_DASHBOARD_DATA_DIR` if explicitly supplied
+2. Railway's automatically supplied `RAILWAY_VOLUME_MOUNT_PATH` plus `/dns-dashboard`
+3. `/data/dns-dashboard`
+4. `/tmp/dns-dashboard` only when the selected location cannot be used
+
+`DNS_DASHBOARD_DATA_DIR` is an infrastructure-only escape hatch for providers that force volumes to another path. It is not part of normal DNS configuration.
+
+The Docker entrypoint handles root-owned mounted volumes, prepares only the application data directory, then starts Python as the unprivileged `app` user.
+
+## 4. Plain Docker
+
+The simplest persistent deployment is:
+
+```bash
+docker run -d \
+  --name dns-dashboard \
+  --restart unless-stopped \
+  -p 10000:10000 \
+  -v dns-dashboard-data:/data \
+  ghcr.io/ntun7729/dns:latest
+```
+
+Open:
+
+```text
+http://SERVER_IP:10000
+```
+
+For internet-facing use, put the dashboard behind HTTPS using your reverse proxy or hosting platform.
+
+No DNS/FRP/TLS environment variables are required for a new deployment.
+
+## 5. Docker Compose
+
+The repository includes `docker-compose.yml`.
+
+```bash
+docker compose up -d
+```
+
+The Compose file publishes port `10000` and creates a persistent named volume mounted at `/data`.
+
+Useful commands:
+
+```bash
+docker compose logs -f
+docker compose restart
+docker compose pull
+docker compose up -d
+```
+
+## 6. Railway
+
+Railway automatically detects a root `Dockerfile` and injects the HTTP `PORT` used by its routing and deployment health checks. Railway also automatically exposes the mount path of an attached Volume through `RAILWAY_VOLUME_MOUNT_PATH`, which this application detects. Railway's current documentation states that Volumes persist across deployments and restarts.
+
+Recommended Railway setup:
+
+1. Create a new service from this GitHub repository.
+2. Let Railway build the root `Dockerfile`.
+3. Under Networking, generate a public domain for the dashboard.
+4. Configure the healthcheck path as:
+
+```text
+/healthz
+```
+
+5. Attach a Railway Volume. Mounting it at `/data` is recommended, but another mount path also works because the application detects Railway's supplied volume path.
+6. Deploy.
+7. Open the Railway public URL and create the administrator.
+8. Complete all DNS/FRPC/TLS configuration in **Dashboard → Settings**.
+9. Configure upstream resolvers/filtering in **Profiles**.
+
+You do not need to define `PORT` yourself; Railway provides it. You also do not need the old DNS, FRP, TLS, or administrator variables.
+
+A Railway service with an attached volume can have a brief interruption during redeployment because Railway does not mount one volume into two active deployments at the same time.
+
+## 7. Render
+
+`render.yaml` remains available as an optional Render-specific convenience file. It is not required by the application.
+
+Recommended setup:
+
+1. Create a Docker web service from the repository.
+2. Use `/healthz` as the health check.
+3. If your plan supports persistent disks, mount one at `/data`.
+4. Deploy and open the dashboard.
+5. Configure the application from the dashboard.
+
+On a Render service without persistent storage, dashboard state is stored on the ephemeral filesystem and may be lost when the container is replaced. In that case, use **Settings → Export full backup** and store it securely.
+
+## 8. Other Docker/PaaS providers
+
+For Fly.io, Koyeb, Northflank, Coolify, Dokku, Easypanel, Portainer, a VPS, or another container service, use the same pattern:
+
+1. Build from the repository Dockerfile or deploy `ghcr.io/ntun7729/dns:latest`.
+2. Route public HTTP/HTTPS traffic to the container's `PORT`/port `10000`.
+3. Configure `/healthz` as the liveness/deployment health endpoint when supported.
+4. Mount persistent storage at `/data` when supported.
+5. If the provider forces another volume path and does not expose it automatically, set only:
+
+```text
+DNS_DASHBOARD_DATA_DIR=/your/mount/path/dns-dashboard
+```
+
+6. Configure everything else through the dashboard.
+
+If the provider injects `PORT`, the application honors it automatically. Otherwise it listens on `10000` by default.
+
+## 9. First-run dashboard setup
+
+When no administrator exists, the dashboard automatically opens **Settings**.
+
+1. Create an administrator username and strong password.
+2. Allow the page to reload.
+3. Sign in through HTTP Basic authentication.
+4. Return to **Settings**.
+
+Claim a fresh deployment before sharing its dashboard URL. The setup endpoint is intentionally available only while no administrator exists.
+
+## 10. Configure FRPS on the public server
 
 Example tokenless FRPS configuration:
 
@@ -55,21 +188,20 @@ log.to = "/var/log/frps.log"
 log.level = "info"
 ```
 
-If you enable token authentication on FRPS, enter the same token later in **Dashboard → Settings → FRPC tunnel**.
+If you enable FRP token authentication on FRPS, enter the same token later in **Dashboard → Settings → FRPC tunnel**.
 
-Typical checks:
+Typical service checks:
 
 ```bash
 sudo systemctl status frps
 sudo journalctl -u frps -n 100 --no-pager
-sudo tail -n 100 /var/log/frps.log
 ```
 
-## 4. Firewall
+## 11. FRPS firewall
 
-Allow inbound TCP on the VPS for:
+Allow inbound TCP on the FRPS VPS for the ports you use, normally:
 
-- `7000` — FRPC control
+- `7000` — FRPC control connection
 - `853` — public DNS-over-TLS
 
 Example:
@@ -80,31 +212,27 @@ sudo ufw allow 853/tcp
 sudo ufw status
 ```
 
-Do not expose the Render container's `8853` or `10000` ports on the VPS.
+The Docker/PaaS host normally needs only outbound access to `7000`; public DoT traffic terminates at FRPS, not at the PaaS web endpoint.
 
-## 5. Cloudflare DNS
+## 12. DNS record
 
-For the example deployment:
+Create an A/AAAA record for your Private DNS hostname pointing to the FRPS server.
+
+Example:
 
 ```text
 Type: A
 Name: dns
-Content: 152.42.239.169
-Proxy status: DNS only / gray cloud
+Content: <FRPS_PUBLIC_IP>
+Proxy status: DNS only
 TTL: Auto
 ```
 
-Do not orange-cloud proxy a normal DoT endpoint. Remove a conflicting `AAAA` record unless the FRPS VPS is genuinely reachable over IPv6.
+For Cloudflare DNS, normal DNS-over-TLS should remain DNS-only rather than orange-cloud HTTP proxy mode.
 
-Verify:
+## 13. Obtain a public TLS certificate
 
-```bash
-dig +short dns.nyan.college A
-```
-
-## 6. Obtain a public TLS certificate
-
-Android Private DNS requires a certificate trusted by the client for the exact provider hostname. Do not use a Cloudflare Origin Certificate as the client-facing certificate.
+Android Private DNS requires a publicly trusted certificate for the exact provider hostname.
 
 Example Let's Encrypt manual DNS challenge:
 
@@ -112,158 +240,92 @@ Example Let's Encrypt manual DNS challenge:
 sudo certbot certonly \
   --manual \
   --preferred-challenges dns \
-  -d dns.nyan.college
+  -d dns.example.com
 ```
 
 Typical files:
 
 ```text
-/etc/letsencrypt/live/dns.nyan.college/fullchain.pem
-/etc/letsencrypt/live/dns.nyan.college/privkey.pem
+/etc/letsencrypt/live/dns.example.com/fullchain.pem
+/etc/letsencrypt/live/dns.example.com/privkey.pem
 ```
 
 Inspect the certificate:
 
 ```bash
 sudo openssl x509 \
-  -in /etc/letsencrypt/live/dns.nyan.college/fullchain.pem \
+  -in /etc/letsencrypt/live/dns.example.com/fullchain.pem \
   -noout -subject -issuer -dates -ext subjectAltName
 ```
 
-Do not copy the private key into GitHub, issues, logs, or public messages.
+Never commit or publicly paste the private key.
 
-## 7. Deploy on Render
+## 14. Configure DoT and FRPC in the dashboard
 
-Create a Docker web service from this repository. The blueprint only uses process bootstrap variables:
-
-```text
-APP_ENV=production
-PORT=10000
-```
-
-You do **not** need to create Render/Docker variables for DNS, FRPC, TLS, filtering, upstreams, or dashboard login.
-
-After deployment, open the Render service URL.
-
-## 8. First-run dashboard setup
-
-When no administrator exists, the dashboard automatically opens **Settings**.
-
-1. Create an administrator username and a strong password.
-2. The page reloads.
-3. Sign in through the browser's HTTP Basic authentication prompt.
-4. Return to **Settings**.
-
-Claim a fresh deployment immediately. Until the first administrator is created, the one-time setup endpoint is deliberately available so the owner can initialize the service without an external bootstrap secret.
-
-## 9. Configure DoT and FRPC from Settings
-
-Under **DNS-over-TLS** set:
+Under **DNS-over-TLS**:
 
 ```text
 Enable DoT: on
 Local bind IP: 127.0.0.1
 Local DoT port: 8853
-Private DNS hostname: dns.nyan.college
+Private DNS hostname: dns.example.com
 ```
 
-The dashboard restricts the local DoT bind address to loopback for safety.
+The dashboard intentionally restricts DoT to loopback because FRPC is the public exposure layer.
 
-Under **FRPC tunnel** set:
+Under **FRPC tunnel**:
 
 ```text
 Enable FRPC: on
-FRPS address: 152.42.239.169
+FRPS address: <FRPS_PUBLIC_IP_OR_HOSTNAME>
 FRPS control port: 7000
 Public DoT port: 853
 FRP token: blank for tokenless FRPS, otherwise the matching server token
 ```
 
-Under **Resolver behavior**, set the global timeout/cooldown/history values you want. Resolver addresses and strategy are configured per profile on the **Profiles** page.
+Resolver timeout/cooldown/history settings are global. Resolver addresses and selection strategy are profile-specific.
 
-## 10. Upload TLS from the dashboard
+## 15. Upload TLS in the dashboard
 
 Open **Settings → TLS certificate** and paste:
 
-- The certificate/full-chain PEM into **Certificate / full chain PEM**
-- The matching private-key PEM into **Private key PEM**
+- certificate/full-chain PEM
+- matching private-key PEM
 
-The server validates the candidate pair before replacement. It checks that the key matches, the certificate matches the configured Private DNS hostname, and the validity dates are acceptable.
+Before replacing active files, the server validates:
 
-If validation fails, the candidate upload is rejected and the existing certificate files are not replaced.
+- PEM structure
+- certificate/private-key match
+- SAN/hostname match
+- validity start
+- expiry
 
-Click **Save settings and restart**. The HTTP response is returned first, then the application performs a controlled self-restart so DoT and FRPC start with the new global configuration.
+If validation fails, the existing certificate remains untouched.
 
-## 11. Configure profiles
+Click **Save settings and restart** after global/TLS changes.
 
-Open **Profiles** and configure one or more named profiles. Each profile can contain:
+## 16. Configure profiles
 
-- Upstream resolvers such as `1.1.1.1:53,9.9.9.9:53,8.8.8.8:53`
+Under **Profiles**, configure:
+
+- upstream resolvers such as `1.1.1.1:53,9.9.9.9:53,8.8.8.8:53`
 - `primary_failover` or `round_robin`
-- Filtering on/off
+- filtering on/off
 - HaGeZi Light preset
-- Up to five raw GitHub blocklist sources
-- Manual block domains
-- Allow domains
+- optional custom raw-GitHub blocklists
+- manual block domains
+- allow domains
 
-Profile changes apply immediately and do not require a service restart.
+Profile changes apply immediately and are persisted automatically.
 
-## 12. Persistent storage
-
-The application stores mutable dashboard state under:
-
-```text
-/data/dns-dashboard
-```
-
-This includes:
-
-- `config.json`
-- `profiles.json`
-- `tls.crt`
-- `tls.key`
-- generated `frpc.toml`
-
-### Render paid services
-
-Attach a Render persistent disk and mount it at `/data/dns-dashboard` or `/data`. Only files under the disk mount survive redeploys and restarts.
-
-### Render Free services
-
-Free web services cannot attach persistent disks. Their filesystem is ephemeral and local changes can disappear on restart, redeploy, or idle spin-down.
-
-For Free deployments, use **Settings → Export full backup** after important changes. The full backup contains configuration, profiles, TLS material, and FRP token. It is sensitive. Store it securely and use **Import full backup** when restoration is needed.
-
-If the intended data directory is not writable, the Settings page shows that temporary fallback storage is being used.
-
-## 13. Existing v3 environment-variable migration
-
-When the v4 data store is empty, the service reads existing legacy environment variables once and writes their values into dashboard storage. Existing dashboard credentials are converted to scrypt hashes, and existing TLS environment material is copied to dashboard TLS files when needed.
-
-After the migration succeeds, edit the service through the dashboard instead of changing the legacy environment variables.
-
-## 14. Expected healthy state
-
-A healthy deployment should show approximately:
-
-```text
-HTTP service: Healthy
-DoT listener: Running
-FRPC tunnel: Running
-Certificate: Valid
-Upstream pool: Healthy
-```
-
-The Overview page should also show the public DoT endpoint, FRPS control endpoint, active profile, filtering state, and resolver telemetry.
-
-## 15. Verify public TLS/DoT
+## 17. Verify the public endpoint
 
 From a machine with OpenSSL:
 
 ```bash
 openssl s_client \
-  -connect dns.nyan.college:853 \
-  -servername dns.nyan.college
+  -connect dns.example.com:853 \
+  -servername dns.example.com
 ```
 
 Look for:
@@ -272,9 +334,9 @@ Look for:
 Verify return code: 0 (ok)
 ```
 
-Confirm the certificate SAN contains the correct hostname.
+Confirm that the certificate SAN contains the configured hostname.
 
-## 16. Android Private DNS
+## 18. Android Private DNS
 
 On Android:
 
@@ -282,89 +344,86 @@ On Android:
 2. Open **Network & Internet** or **Connections**.
 3. Open **Private DNS**.
 4. Select **Private DNS provider hostname**.
-5. Enter only:
+5. Enter only the hostname, for example:
 
 ```text
-dns.nyan.college
+dns.example.com
 ```
 
-6. Save.
+Do not include `https://`, an IP address, or `:853`.
 
-Do not enter `https://`, an IP address, or `:853` in that field.
+Generate several lookups and confirm the dashboard query counter increases.
 
-Generate a few new lookups and check that the dashboard query count increases.
+## 19. Health endpoints
 
-## 17. Health and control endpoints
-
-| Endpoint | Purpose |
+| Endpoint | Meaning |
 | --- | --- |
-| `/` | Operations dashboard |
-| `/healthz` | Process liveness |
-| `/readyz` | DoT/certificate/FRPC readiness |
-| `/api/status` | Aggregate operational telemetry |
-| `/api/control` | Profile control API |
-| `/api/settings` | Redacted service settings API |
-| `/api/settings/export` | Sensitive full backup |
-| `/api/setup` | First-run administrator initialization |
+| `/healthz` | HTTP process liveness; always suitable for platform health checks |
+| `/readyz` | Full DoT/certificate/FRPC readiness |
 
-`/healthz` and `/readyz` remain unauthenticated for platform health checks. Normal dashboard and control APIs require authentication after setup.
+Use `/healthz` for PaaS deployment health checks. A brand-new container can intentionally have DoT/FRPC unconfigured until you complete first-run setup, so using `/readyz` as the deployment gate can prevent access to the dashboard you need to configure it.
 
-## 18. Certificate renewal
+## 20. Backup and restore
 
-Before expiry:
+**Settings → Export full backup** includes:
 
-1. Renew/reissue the certificate.
-2. Verify the hostname/SAN and dates locally.
-3. Open **Dashboard → Settings → TLS certificate**.
-4. Paste the renewed full chain and matching private key.
-5. Save settings.
-6. Confirm the dashboard shows the new expiry date.
-7. Re-run the public `openssl s_client` check.
+- dashboard-managed global configuration
+- resolver/filter profiles
+- TLS certificate
+- TLS private key
+- FRP token when configured
 
-No Render environment-variable or base64-secret editing is required.
+This file is sensitive. Store it like a credential/private key.
 
-## 19. Troubleshooting
+Profile-only export remains available separately when you do not want secrets included.
 
-### Certificate does not match the hostname
+## 21. Existing deployment migration
 
-Make sure **Private DNS hostname** in Settings matches the certificate SAN exactly and that you uploaded the correct certificate chain.
+When persistent v4 configuration does not exist, the application can migrate the old environment-based settings once. Existing dashboard credentials are converted to scrypt hashes; legacy TLS environment material is copied into dashboard-managed files if needed.
 
-### Certificate/key pair rejected
+After migration, make operational changes in the dashboard.
 
-Verify locally that the certificate and private key belong together. The dashboard intentionally refuses to replace the active files with a mismatched pair.
+## 22. Troubleshooting
 
-### FRPC says it needs configuration
+### Settings says temporary fallback storage is active
 
-Open **Settings → FRPC tunnel** and enter the FRPS address and ports. Do not edit `FRP_SERVER_ADDR` in Render for v4.
+Your preferred data location was not writable. Attach a persistent volume, preferably at `/data`, then redeploy/restart. On providers that force another mount path, use `DNS_DASHBOARD_DATA_DIR` only for that infrastructure path.
+
+### Railway configuration disappears
+
+Ensure a Railway Volume is attached. Railway automatically exposes its mount path and the application will store data below it. Without a volume, normal container filesystem data is not a persistence guarantee.
+
+### FRPC needs configuration
+
+Open **Settings → FRPC tunnel** and provide the FRPS address/ports. Do not create legacy FRP environment variables for a new v4 deployment.
 
 ### FRPC is blocked
 
-FRPC waits for the local DoT listener to become ready. Fix the hostname/certificate/DoT problem first, save, and restart from Settings.
+FRPC waits until DoT is ready. Correct the Private DNS hostname/TLS configuration first, save, and restart from Settings.
 
 ### Android cannot connect
 
-Check:
+Verify:
 
-- DNS record is DNS-only
-- VPS TCP `853` is open
+- DNS record points to the FRPS server
 - FRPS is running
+- VPS TCP `853` is open
 - FRPC is running
-- Public TLS verification succeeds
-- No broken/conflicting IPv6 record exists
-- Android provider hostname exactly matches the certificate
+- certificate verification succeeds
+- hostname exactly matches the certificate
+- any AAAA record is actually reachable
 
-### Dashboard configuration disappeared
+### Dashboard works but DNS query count remains zero
 
-Check **Settings → Storage**. On Render Free this is expected after filesystem reset because persistent disks are unavailable. Restore a full backup. On a paid service, verify a persistent disk is mounted over `/data/dns-dashboard` or `/data`.
+The dashboard and DoT path are different network paths. Verify that the DoT client is using the configured Private DNS hostname and that the FRPS public endpoint is reachable.
 
-## 20. Security and backup rules
+## 23. Security rules
 
-- Create the first dashboard administrator immediately after deployment.
+- Create the first administrator immediately.
 - Use a strong unique password.
-- Keep the repository private if it contains deployment-specific operational information.
 - Never commit TLS private keys, FRP tokens, or full dashboard backups.
-- Treat exported full backups as secrets.
-- Keep DoT bound to loopback and expose it only through the intended FRPC path.
-- Restrict FRPS firewall ports to what the deployment actually requires.
-- Enable an FRP token if you want authentication on the FRPC control connection.
-- Rotate credentials/certificates if private material is exposed.
+- Keep DoT bound to loopback unless you deliberately redesign the exposure model.
+- Restrict FRPS firewall ports to those actually required.
+- Enable FRP authentication if the control endpoint should reject untrusted clients.
+- Treat full dashboard backups as secret material.
+- Rotate affected credentials/certificates if private material is exposed.
