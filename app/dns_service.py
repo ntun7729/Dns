@@ -34,6 +34,8 @@ MAX_DNS_CACHE_RESPONSE_BYTES = 8192
 MAX_DNS_CACHE_TTL_SECONDS = 300.0
 MAX_INFLIGHT_QUERIES_PER_CONNECTION = 64
 MAX_DNS_NAME_POINTER_JUMPS = 32
+DOT_TLS_HANDSHAKE_TIMEOUT_SECONDS = 5.0
+DOT_TLS_SHUTDOWN_TIMEOUT_SECONDS = 1.0
 _DNS_CACHE: dict[tuple[str, str, str, bytes], tuple[bytes, float]] = {}
 _DNS_CACHE_LOCK = threading.Lock()
 
@@ -482,7 +484,9 @@ async def handle_dot(
                 writer.write(len(response).to_bytes(2, "big") + response)
                 await writer.drain()
             runtime.record_query(blocked=blocked)
-        except (ConnectionError, ssl.SSLError):
+        except OSError:
+            # A mobile client may abandon the connection while switching between
+            # networks/VPN paths. The DNS request itself has already been handled.
             pass
 
     try:
@@ -513,7 +517,7 @@ async def handle_dot(
             task = asyncio.create_task(process_query(payload))
             tasks.add(task)
             task.add_done_callback(tasks.discard)
-    except (OSError, ssl.SSLError):
+    except OSError:
         runtime.record_unexpected_disconnect()
     except Exception as exc:
         runtime.record_dns_error(classify_dns_error(exc), redact_text(str(exc), settings))
@@ -523,9 +527,15 @@ async def handle_dot(
         runtime.connection_delta(-1)
         writer.close()
         try:
-            await writer.wait_closed()
-        except (ConnectionError, ssl.SSLError):
-            pass
+            await asyncio.wait_for(
+                writer.wait_closed(), timeout=DOT_TLS_SHUTDOWN_TIMEOUT_SECONDS
+            )
+        except OSError:
+            # SSL shutdown timeouts are normal when Android or a VPN drops the
+            # underlying route without sending TLS close_notify.
+            transport = writer.transport
+            if transport is not None:
+                transport.abort()
 
 
 async def run_dot_server(
@@ -547,6 +557,8 @@ async def run_dot_server(
         host=settings.dot_bind_host,
         port=settings.dot_port,
         ssl=context,
+        ssl_handshake_timeout=DOT_TLS_HANDSHAKE_TIMEOUT_SECONDS,
+        ssl_shutdown_timeout=DOT_TLS_SHUTDOWN_TIMEOUT_SECONDS,
     )
     runtime.update(dot_state="running", dot_last_error=None)
     startup_complete.set()
