@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import http.client
 import ipaddress
 import socket
 import ssl
@@ -19,12 +20,11 @@ _RESOLVER_CACHE_LOCK = threading.Lock()
 RESOLVER_CACHE_TTL = 300.0
 
 # Many container platforms either rate-limit or block outbound UDP/53 while
-# allowing TCP/53. Probe UDP briefly, then fall back to TCP within the same
-# configured upstream timeout budget. Remember working TCP preference so every
-# subsequent DNS query does not pay the UDP timeout penalty.
+# allowing TCP/53. Probe UDP briefly, then fall back to TCP. Once TCP succeeds,
+# keep that preference until it actually fails; do not force a periodic UDP
+# retry that can interrupt Android strict Private DNS validation.
 UDP_PROBE_TIMEOUT_SECONDS = 0.35
-TRANSPORT_PREFERENCE_TTL_SECONDS = 300.0
-_TRANSPORT_PREFERENCE: dict[str, tuple[str, float]] = {}
+_TRANSPORT_PREFERENCE: dict[str, str] = {}
 _TRANSPORT_PREFERENCE_LOCK = threading.Lock()
 
 # Keep the application-level DNS cache intentionally small. It exists to absorb
@@ -163,24 +163,13 @@ def _remaining_timeout(deadline: float, *, minimum: float = 0.05) -> float:
 
 
 def _transport_preference(endpoint: UpstreamEndpoint) -> str | None:
-    now = time.monotonic()
     with _TRANSPORT_PREFERENCE_LOCK:
-        cached = _TRANSPORT_PREFERENCE.get(endpoint.key)
-        if cached is None:
-            return None
-        transport, expiry = cached
-        if now >= expiry:
-            _TRANSPORT_PREFERENCE.pop(endpoint.key, None)
-            return None
-        return transport
+        return _TRANSPORT_PREFERENCE.get(endpoint.key)
 
 
 def _remember_transport(endpoint: UpstreamEndpoint, transport: str) -> None:
     with _TRANSPORT_PREFERENCE_LOCK:
-        _TRANSPORT_PREFERENCE[endpoint.key] = (
-            transport,
-            time.monotonic() + TRANSPORT_PREFERENCE_TTL_SECONDS,
-        )
+        _TRANSPORT_PREFERENCE[endpoint.key] = transport
 
 
 def send_tcp_query(endpoint: UpstreamEndpoint, payload: bytes, timeout: float) -> bytes:
@@ -240,12 +229,10 @@ def _send_udp_only(endpoint: UpstreamEndpoint, payload: bytes, timeout: float) -
 
 
 def send_udp_query(endpoint: UpstreamEndpoint, payload: bytes, timeout: float) -> bytes:
-    """Resolve with fast UDP and transparent TCP fallback.
+    """Resolve classic DNS with fast UDP and transparent TCP fallback."""
+    if endpoint.is_doh:
+        raise ValueError("send_udp_query cannot be used for a DoH endpoint.")
 
-    The public function name is retained for compatibility with existing tests and
-    imports, but it now implements transport fallback as required by RFC-compliant
-    DNS clients running behind platforms where outbound UDP/53 may be unreliable.
-    """
     timeout = max(0.2, float(timeout))
     deadline = time.monotonic() + timeout
 
@@ -289,6 +276,58 @@ def send_udp_query(endpoint: UpstreamEndpoint, payload: bytes, timeout: float) -
         raise
 
 
+def send_doh_query(endpoint: UpstreamEndpoint, payload: bytes, timeout: float) -> bytes:
+    """Send an RFC 8484 DNS message using HTTPS POST."""
+    if not endpoint.is_doh:
+        raise ValueError("send_doh_query requires an HTTPS DoH endpoint.")
+
+    connection = http.client.HTTPSConnection(
+        endpoint.host,
+        endpoint.port,
+        timeout=max(0.2, float(timeout)),
+        context=ssl.create_default_context(),
+    )
+    try:
+        connection.request(
+            "POST",
+            endpoint.request_target,
+            body=payload,
+            headers={
+                "Accept": "application/dns-message",
+                "Content-Type": "application/dns-message",
+                "Content-Length": str(len(payload)),
+                "User-Agent": "DNS-Dashboard/4.1",
+            },
+        )
+        response = connection.getresponse()
+        if response.status != 200:
+            response.read(512)
+            raise OSError(
+                f"DoH upstream {endpoint.key} returned HTTP {response.status}."
+            )
+        content_type = (response.getheader("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if content_type and content_type != "application/dns-message":
+            response.read(512)
+            raise OSError(
+                f"DoH upstream {endpoint.key} returned unsupported content type {content_type}."
+            )
+        body = response.read(MAX_DNS_MESSAGE_BYTES + 1)
+        if len(body) > MAX_DNS_MESSAGE_BYTES:
+            raise OSError("DoH upstream response exceeds the maximum DNS message size.")
+        _validate_upstream_response(payload, body)
+        return body
+    except (http.client.HTTPException, ssl.SSLError) as exc:
+        raise OSError(f"DoH request to {endpoint.key} failed: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def send_upstream_query(endpoint: UpstreamEndpoint, payload: bytes, timeout: float) -> bytes:
+    if endpoint.is_doh:
+        return send_doh_query(endpoint, payload, timeout)
+    return send_udp_query(endpoint, payload, timeout)
+
+
 def query_upstreams_sync(
     payload: bytes,
     profile: ProfileSnapshot,
@@ -300,7 +339,7 @@ def query_upstreams_sync(
     for index, endpoint in enumerate(endpoints):
         started = time.perf_counter()
         try:
-            response = send_udp_query(endpoint, payload, settings.upstream_timeout_seconds)
+            response = send_upstream_query(endpoint, payload, settings.upstream_timeout_seconds)
         except (OSError, TimeoutError) as exc:
             errors.append(exc)
             runtime.record_upstream_failure(endpoint, exc, settings)
