@@ -7,6 +7,7 @@ import ipaddress
 import os
 import re
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -97,11 +98,50 @@ def env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
 class UpstreamEndpoint:
     host: str
     port: int
+    protocol: str = "dns"
+    path: str = ""
+
+    @property
+    def is_doh(self) -> bool:
+        return self.protocol == "doh"
+
+    @property
+    def request_target(self) -> str:
+        return self.path or "/dns-query"
 
     @property
     def key(self) -> str:
+        if self.is_doh:
+            host = f"[{self.host}]" if ":" in self.host else self.host
+            authority = host if self.port == 443 else f"{host}:{self.port}"
+            return f"https://{authority}{self.request_target}"
         host = f"[{self.host}]" if ":" in self.host else self.host
         return f"{host}:{self.port}"
+
+
+def _parse_doh_endpoint(item: str) -> UpstreamEndpoint:
+    if len(item) > 2048:
+        raise ValueError("DoH upstream URL is too long.")
+    try:
+        parsed = urllib.parse.urlsplit(item)
+        port = parsed.port or 443
+    except ValueError as exc:
+        raise ValueError(f"Invalid DoH upstream URL: {item}") from exc
+    if parsed.scheme.lower() != "https":
+        raise ValueError("DoH upstreams must use https://.")
+    if parsed.username or parsed.password:
+        raise ValueError("DoH upstream URLs must not contain credentials.")
+    host = (parsed.hostname or "").strip().rstrip(".")
+    if not host or len(host) > 253 or not 1 <= port <= 65535:
+        raise ValueError(f"Invalid DoH upstream URL: {item}")
+    if parsed.fragment:
+        raise ValueError("DoH upstream URLs must not contain fragments.")
+    path = parsed.path or "/dns-query"
+    if not path.startswith("/") or len(path) > 1536:
+        raise ValueError("DoH upstream path is invalid or too long.")
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    return UpstreamEndpoint(host, port, "doh", path)
 
 
 def parse_upstream_servers(
@@ -110,7 +150,7 @@ def parse_upstream_servers(
     fallback_host: str = "1.1.1.1",
     fallback_port: int = 53,
 ) -> tuple[UpstreamEndpoint, ...]:
-    """Parse comma/newline separated host[:port] values, including IPv6."""
+    """Parse classic DNS host[:port] and HTTPS DNS-over-HTTPS endpoints."""
     raw_items = [
         item.strip()
         for item in (value or "").replace("\n", ",").split(",")
@@ -122,40 +162,48 @@ def parse_upstream_servers(
     endpoints: list[UpstreamEndpoint] = []
     seen: set[str] = set()
     for item in raw_items:
-        host = item
-        port = fallback_port
-        if item.startswith("["):
-            closing = item.find("]")
-            if closing < 2:
-                raise ValueError(f"Invalid bracketed upstream address: {item}")
-            host = item[1:closing]
-            remainder = item[closing + 1 :]
-            if remainder:
-                if not remainder.startswith(":") or not remainder[1:]:
-                    raise ValueError(f"Invalid upstream address: {item}")
+        if item.lower().startswith("https://"):
+            endpoint = _parse_doh_endpoint(item)
+        else:
+            if "://" in item:
+                raise ValueError(
+                    "Unsupported upstream scheme. Use host:port for classic DNS or https:// for DoH."
+                )
+            host = item
+            port = fallback_port
+            if item.startswith("["):
+                closing = item.find("]")
+                if closing < 2:
+                    raise ValueError(f"Invalid bracketed upstream address: {item}")
+                host = item[1:closing]
+                remainder = item[closing + 1 :]
+                if remainder:
+                    if not remainder.startswith(":") or not remainder[1:]:
+                        raise ValueError(f"Invalid upstream address: {item}")
+                    try:
+                        port = int(remainder[1:])
+                    except ValueError as exc:
+                        raise ValueError(f"Invalid upstream port: {item}") from exc
+            elif item.count(":") == 1:
+                host, raw_port = item.rsplit(":", 1)
                 try:
-                    port = int(remainder[1:])
+                    port = int(raw_port)
                 except ValueError as exc:
                     raise ValueError(f"Invalid upstream port: {item}") from exc
-        elif item.count(":") == 1:
-            host, raw_port = item.rsplit(":", 1)
-            try:
-                port = int(raw_port)
-            except ValueError as exc:
-                raise ValueError(f"Invalid upstream port: {item}") from exc
-        elif item.count(":") > 1:
-            try:
-                ipaddress.IPv6Address(item)
-            except ValueError as exc:
-                raise ValueError(
-                    "IPv6 upstreams with an explicit port must use [address]:port."
-                ) from exc
-            host = item
+            elif item.count(":") > 1:
+                try:
+                    ipaddress.IPv6Address(item)
+                except ValueError as exc:
+                    raise ValueError(
+                        "IPv6 upstreams with an explicit port must use [address]:port."
+                    ) from exc
+                host = item
 
-        host = host.strip().rstrip(".")
-        if not host or not 1 <= port <= 65535:
-            raise ValueError(f"Invalid upstream resolver: {item}")
-        endpoint = UpstreamEndpoint(host, port)
+            host = host.strip().rstrip(".")
+            if not host or not 1 <= port <= 65535:
+                raise ValueError(f"Invalid upstream resolver: {item}")
+            endpoint = UpstreamEndpoint(host, port)
+
         if endpoint.key not in seen:
             endpoints.append(endpoint)
             seen.add(endpoint.key)
