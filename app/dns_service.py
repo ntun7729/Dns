@@ -18,14 +18,22 @@ _RESOLVER_CACHE: dict[str, tuple[list[tuple], float]] = {}
 _RESOLVER_CACHE_LOCK = threading.Lock()
 RESOLVER_CACHE_TTL = 300.0
 
-# Keep the application-level DNS cache intentionally small.  It exists to absorb
-# repeat lookups, not to become an unbounded recursive-resolver cache on a small
-# container.  Profile revision is part of every key so edits never reuse answers
-# produced under old upstream/profile settings.
+# Many container platforms either rate-limit or block outbound UDP/53 while
+# allowing TCP/53. Probe UDP briefly, then fall back to TCP within the same
+# configured upstream timeout budget. Remember working TCP preference so every
+# subsequent DNS query does not pay the UDP timeout penalty.
+UDP_PROBE_TIMEOUT_SECONDS = 0.35
+TRANSPORT_PREFERENCE_TTL_SECONDS = 300.0
+_TRANSPORT_PREFERENCE: dict[str, tuple[str, float]] = {}
+_TRANSPORT_PREFERENCE_LOCK = threading.Lock()
+
+# Keep the application-level DNS cache intentionally small. It exists to absorb
+# repeat lookups, not to become an unbounded recursive-resolver cache.
 MAX_DNS_CACHE_ENTRIES = 4096
 MAX_DNS_CACHE_RESPONSE_BYTES = 8192
 MAX_DNS_CACHE_TTL_SECONDS = 300.0
 MAX_INFLIGHT_QUERIES_PER_CONNECTION = 64
+MAX_DNS_NAME_POINTER_JUMPS = 32
 _DNS_CACHE: dict[tuple[str, str, str, bytes], tuple[bytes, float]] = {}
 _DNS_CACHE_LOCK = threading.Lock()
 
@@ -106,8 +114,9 @@ def _resolve_endpoint(host: str, port: int, socktype: int) -> list[tuple]:
     cache_key = f"{host}:{port}:{socktype}"
     now = time.monotonic()
     with _RESOLVER_CACHE_LOCK:
-        if cache_key in _RESOLVER_CACHE:
-            cached_addrs, expiry = _RESOLVER_CACHE[cache_key]
+        cached = _RESOLVER_CACHE.get(cache_key)
+        if cached is not None:
+            cached_addrs, expiry = cached
             if now < expiry:
                 return cached_addrs
 
@@ -116,8 +125,9 @@ def _resolve_endpoint(host: str, port: int, socktype: int) -> list[tuple]:
         addresses = sorted(addresses, key=lambda addr: 0 if addr[0] == socket.AF_INET else 1)
     except OSError as exc:
         with _RESOLVER_CACHE_LOCK:
-            if cache_key in _RESOLVER_CACHE:
-                return _RESOLVER_CACHE[cache_key][0]
+            cached = _RESOLVER_CACHE.get(cache_key)
+            if cached is not None:
+                return cached[0]
         raise exc
 
     with _RESOLVER_CACHE_LOCK:
@@ -146,8 +156,34 @@ def _validate_upstream_response(payload: bytes, response: bytes) -> None:
         raise OSError("Upstream returned a DNS message without the response bit set.")
 
 
+def _remaining_timeout(deadline: float, *, minimum: float = 0.05) -> float:
+    return max(minimum, deadline - time.monotonic())
+
+
+def _transport_preference(endpoint: UpstreamEndpoint) -> str | None:
+    now = time.monotonic()
+    with _TRANSPORT_PREFERENCE_LOCK:
+        cached = _TRANSPORT_PREFERENCE.get(endpoint.key)
+        if cached is None:
+            return None
+        transport, expiry = cached
+        if now >= expiry:
+            _TRANSPORT_PREFERENCE.pop(endpoint.key, None)
+            return None
+        return transport
+
+
+def _remember_transport(endpoint: UpstreamEndpoint, transport: str) -> None:
+    with _TRANSPORT_PREFERENCE_LOCK:
+        _TRANSPORT_PREFERENCE[endpoint.key] = (
+            transport,
+            time.monotonic() + TRANSPORT_PREFERENCE_TTL_SECONDS,
+        )
+
+
 def send_tcp_query(endpoint: UpstreamEndpoint, payload: bytes, timeout: float) -> bytes:
     last_error: OSError | None = None
+    deadline = time.monotonic() + max(0.05, timeout)
     try:
         addresses = _resolve_endpoint(endpoint.host, endpoint.port, socket.SOCK_STREAM)
     except OSError as exc:
@@ -155,24 +191,30 @@ def send_tcp_query(endpoint: UpstreamEndpoint, payload: bytes, timeout: float) -
     for family, socktype, protocol, _canonical_name, address in addresses:
         try:
             with socket.socket(family, socktype, protocol) as sock:
-                sock.settimeout(timeout)
+                sock.settimeout(_remaining_timeout(deadline))
                 sock.connect(address)
+                sock.settimeout(_remaining_timeout(deadline))
                 sock.sendall(len(payload).to_bytes(2, "big") + payload)
+                sock.settimeout(_remaining_timeout(deadline))
                 length = int.from_bytes(_recv_exact(sock, 2), "big")
                 if length < 12 or length > MAX_DNS_MESSAGE_BYTES:
                     raise OSError("Upstream TCP response has an invalid DNS length.")
+                sock.settimeout(_remaining_timeout(deadline))
                 response = _recv_exact(sock, length)
                 _validate_upstream_response(payload, response)
                 return response
         except OSError as exc:
             last_error = exc
+            if time.monotonic() >= deadline:
+                break
     if last_error:
         raise last_error
     raise OSError(f"No TCP address found for upstream {endpoint.key}.")
 
 
-def send_udp_query(endpoint: UpstreamEndpoint, payload: bytes, timeout: float) -> bytes:
+def _send_udp_only(endpoint: UpstreamEndpoint, payload: bytes, timeout: float) -> bytes:
     last_error: OSError | None = None
+    deadline = time.monotonic() + max(0.05, timeout)
     try:
         addresses = _resolve_endpoint(endpoint.host, endpoint.port, socket.SOCK_DGRAM)
     except OSError as exc:
@@ -180,20 +222,69 @@ def send_udp_query(endpoint: UpstreamEndpoint, payload: bytes, timeout: float) -
     for family, socktype, protocol, _canonical_name, address in addresses:
         try:
             with socket.socket(family, socktype, protocol) as sock:
-                sock.settimeout(timeout)
+                sock.settimeout(_remaining_timeout(deadline))
                 sock.connect(address)
                 sock.send(payload)
                 response = sock.recv(MAX_DNS_MESSAGE_BYTES)
                 _validate_upstream_response(payload, response)
-                flags = int.from_bytes(response[2:4], "big")
-                if flags & 0x0200:
-                    return send_tcp_query(endpoint, payload, timeout)
                 return response
         except OSError as exc:
             last_error = exc
+            if time.monotonic() >= deadline:
+                break
     if last_error:
         raise last_error
     raise OSError(f"No UDP address found for upstream {endpoint.key}.")
+
+
+def send_udp_query(endpoint: UpstreamEndpoint, payload: bytes, timeout: float) -> bytes:
+    """Resolve with fast UDP and transparent TCP fallback.
+
+    The public function name is retained for compatibility with existing tests and
+    imports, but it now implements transport fallback as required by RFC-compliant
+    DNS clients running behind platforms where outbound UDP/53 may be unreliable.
+    """
+    timeout = max(0.2, float(timeout))
+    deadline = time.monotonic() + timeout
+
+    if _transport_preference(endpoint) == "tcp":
+        try:
+            response = send_tcp_query(endpoint, payload, _remaining_timeout(deadline))
+            _remember_transport(endpoint, "tcp")
+            return response
+        except OSError:
+            # The network path may have changed. Give UDP one short recovery try.
+            pass
+
+    udp_error: OSError | None = None
+    try:
+        udp_budget = min(UDP_PROBE_TIMEOUT_SECONDS, _remaining_timeout(deadline))
+        response = _send_udp_only(endpoint, payload, udp_budget)
+        flags = int.from_bytes(response[2:4], "big")
+        if not flags & 0x0200:
+            _remember_transport(endpoint, "udp")
+            return response
+        # TC=1: retry the same DNS message over TCP.
+    except OSError as exc:
+        udp_error = exc
+
+    try:
+        response = send_tcp_query(endpoint, payload, _remaining_timeout(deadline))
+        _remember_transport(endpoint, "tcp")
+        return response
+    except OSError as tcp_error:
+        if isinstance(udp_error, (socket.timeout, TimeoutError)) and isinstance(
+            tcp_error, (socket.timeout, TimeoutError)
+        ):
+            raise socket.timeout(
+                f"UDP and TCP DNS queries to {endpoint.key} timed out."
+            ) from tcp_error
+        if udp_error is not None:
+            raise OSError(
+                f"UDP DNS to {endpoint.key} failed ({udp_error}); "
+                f"TCP fallback also failed ({tcp_error})."
+            ) from tcp_error
+        raise
 
 
 def query_upstreams_sync(
@@ -237,37 +328,81 @@ async def forward_dns_query(
     )
 
 
-def parse_dns_question(payload: bytes) -> tuple[str, int]:
-    if len(payload) < 12:
-        raise ValueError("DNS message is shorter than the header.")
-    question_count = int.from_bytes(payload[4:6], "big")
-    if question_count != 1:
-        raise ValueError("DNS requests must contain exactly one question.")
-    offset = 12
+def _decode_dns_name(payload: bytes, offset: int) -> tuple[str, int]:
+    """Decode a DNS name and safely support RFC 1035 compression pointers."""
+    if offset < 0 or offset >= len(payload):
+        raise ValueError("DNS question name is truncated.")
+
     labels: list[str] = []
+    cursor = offset
+    end_offset: int | None = None
+    visited: set[int] = set()
+    jumps = 0
+    expanded_length = 1
+
     while True:
-        if offset >= len(payload):
+        if cursor >= len(payload):
             raise ValueError("DNS question name is truncated.")
-        length = payload[offset]
-        offset += 1
-        if length == 0:
-            break
+        length = payload[cursor]
+
+        if length & 0xC0 == 0xC0:
+            if cursor + 1 >= len(payload):
+                raise ValueError("DNS compression pointer is truncated.")
+            pointer = ((length & 0x3F) << 8) | payload[cursor + 1]
+            if pointer >= len(payload):
+                raise ValueError("DNS compression pointer is outside the message.")
+            if end_offset is None:
+                end_offset = cursor + 2
+            if pointer in visited or jumps >= MAX_DNS_NAME_POINTER_JUMPS:
+                raise ValueError("DNS compression pointer loop detected.")
+            visited.add(pointer)
+            jumps += 1
+            cursor = pointer
+            continue
+
         if length & 0xC0:
-            raise ValueError("Compressed DNS question names are not accepted in requests.")
-        if length > 63 or offset + length > len(payload):
+            raise ValueError("Unsupported DNS label encoding.")
+
+        cursor += 1
+        if length == 0:
+            if end_offset is None:
+                end_offset = cursor
+            break
+        if length > 63 or cursor + length > len(payload):
             raise ValueError("DNS question label is invalid.")
+
+        raw_label = payload[cursor : cursor + length]
         try:
-            label = payload[offset : offset + length].decode("ascii").lower()
+            label = raw_label.decode("ascii").lower()
         except UnicodeDecodeError as exc:
             raise ValueError("DNS question label is not ASCII.") from exc
         if not label.isprintable() or "." in label or "\\" in label:
             raise ValueError("DNS question label contains unsupported characters.")
         labels.append(label)
-        offset += length
-    if offset + 4 > len(payload):
+        expanded_length += length + 1
+        if expanded_length > 255:
+            raise ValueError("DNS question name exceeds 255 bytes.")
+        cursor += length
+
+    return ("." if not labels else ".".join(labels)), int(end_offset)
+
+
+def parse_dns_question(payload: bytes) -> tuple[str, int]:
+    if len(payload) < 12:
+        raise ValueError("DNS message is shorter than the header.")
+    flags = int.from_bytes(payload[2:4], "big")
+    opcode = (flags >> 11) & 0x0F
+    if opcode != 0:
+        raise ValueError(f"Unsupported DNS opcode: {opcode}.")
+    question_count = int.from_bytes(payload[4:6], "big")
+    if question_count != 1:
+        raise ValueError("DNS requests must contain exactly one question.")
+
+    domain, name_end = _decode_dns_name(payload, 12)
+    question_end = name_end + 4
+    if question_end > len(payload):
         raise ValueError("DNS question type or class is truncated.")
-    domain = "." if not labels else ".".join(labels)
-    return domain, offset + 4
+    return domain, question_end
 
 
 def build_dns_response(
