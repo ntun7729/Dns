@@ -30,14 +30,6 @@ from web_app import build_handler, run_http
 
 
 def dashboard_data_root() -> Path | None:
-    """Resolve persistent storage without coupling the image to one hosting provider.
-
-    DNS_DASHBOARD_DATA_DIR is an optional infrastructure-only override for hosts
-    whose persistent volume cannot be mounted at /data. Railway supplies its
-    volume mount path automatically, so no user-defined variable is needed there.
-    The RuntimeConfigStore default remains /data/dns-dashboard for plain Docker
-    and other container platforms.
-    """
     explicit = os.getenv("DNS_DASHBOARD_DATA_DIR", "").strip()
     if explicit:
         return Path(explicit)
@@ -53,9 +45,6 @@ _LEGACY_KEY_PEM = SETTINGS.dot_key_pem
 CONFIG = RuntimeConfigStore(root=dashboard_data_root())
 CONFIG.load_into(SETTINGS)
 
-# One-time compatibility migration for deployments that previously supplied TLS
-# material through environment variables. Future operational edits are made in
-# the web dashboard and stored in the provider-neutral dashboard data directory.
 if _LEGACY_CERT_PEM and _LEGACY_KEY_PEM:
     cert_path = Path(SETTINGS.dot_cert_file)
     key_path = Path(SETTINGS.dot_key_file)
@@ -68,15 +57,25 @@ RUNTIME = RuntimeState(HISTORY)
 PROFILES = ProfileStore(SETTINGS)
 BLOCKLISTS = BlocklistManager(SETTINGS, PROFILES, RUNTIME)
 RUNTIME.ensure_upstreams(SETTINGS.upstreams)
+FRPC_SUPERVISOR: frpc_service.FrpcSupervisor | None = None
+FRPC_LOCK = threading.RLock()
+
+
+def _stop_frpc() -> None:
+    global FRPC_SUPERVISOR
+    with FRPC_LOCK:
+        supervisor = FRPC_SUPERVISOR
+        FRPC_SUPERVISOR = None
+    if supervisor is not None:
+        supervisor.stop()
 
 
 def schedule_restart() -> None:
-    """Replace this process after the current HTTP response has been flushed."""
-
+    """Cleanly replace this process after the HTTP response has been flushed."""
     def restart() -> None:
         time.sleep(0.8)
+        _stop_frpc()
         os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve())])
-
     threading.Thread(target=restart, name="dashboard-restart", daemon=True).start()
 
 
@@ -91,34 +90,43 @@ DashboardHandler = build_handler(
 
 
 def start_frpc(settings: Settings):
-    """Compatibility wrapper used by tests and local tooling."""
     return frpc_service.start_frpc(settings, RUNTIME)
 
 
 def main() -> None:
+    global FRPC_SUPERVISOR
     RUNTIME.reset()
     RUNTIME.ensure_upstreams(PROFILES.active().upstreams)
     BLOCKLISTS.start()
     dot_startup = start_dot_thread(SETTINGS, RUNTIME, PROFILES, BLOCKLISTS)
     dot_startup.wait(timeout=15)
-    frpc = frpc_service.start_frpc(SETTINGS, RUNTIME)
+    with FRPC_LOCK:
+        FRPC_SUPERVISOR = frpc_service.start_frpc(SETTINGS, RUNTIME)
+
+    shutting_down = threading.Event()
 
     def shutdown(_signum: int, _frame: Any) -> None:
+        if shutting_down.is_set():
+            raise SystemExit(0)
+        shutting_down.set()
         BLOCKLISTS.stop_event.set()
-        if frpc and frpc.poll() is None:
-            frpc.terminate()
+        _stop_frpc()
         raise SystemExit(0)
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
-    run_http(
-        SETTINGS,
-        RUNTIME,
-        PROFILES,
-        BLOCKLISTS,
-        config_store=CONFIG,
-        restart_callback=schedule_restart,
-    )
+    try:
+        run_http(
+            SETTINGS,
+            RUNTIME,
+            PROFILES,
+            BLOCKLISTS,
+            config_store=CONFIG,
+            restart_callback=schedule_restart,
+        )
+    finally:
+        BLOCKLISTS.stop_event.set()
+        _stop_frpc()
 
 
 if __name__ == "__main__":
