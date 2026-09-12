@@ -1,9 +1,27 @@
 serverAddr = "203.0.113.10"
 serverPort = 7000
 
+# Reliability defaults used by the dashboard-generated FRPC configuration.
+# Keep retrying when FRPS or cloud networking is briefly unavailable.
+loginFailExit = false
+
+# Keep the FRP control/multiplexed connection alive across NATs and cloud
+# proxies, and fail a genuinely dead tunnel within a bounded time.
+transport.tcpMux = true
+transport.tcpMuxKeepaliveInterval = 15
+transport.dialServerTimeout = 10
+transport.dialServerKeepalive = 30
+transport.heartbeatInterval = 10
+transport.heartbeatTimeout = 90
+transport.tls.enable = true
+
+log.to = "console"
+log.level = "info"
+log.disablePrintColor = true
+
 # Optional. Uncomment both lines only when FRPS uses token authentication.
 # auth.method = "token"
-# auth.token = "replace-with-render-secret"
+# auth.token = "replace-with-your-frps-token"
 
 [[proxies]]
 name = "dns-over-tls"

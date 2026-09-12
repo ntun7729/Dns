@@ -27,15 +27,26 @@ UDP_PROBE_TIMEOUT_SECONDS = 0.35
 _TRANSPORT_PREFERENCE: dict[str, str] = {}
 _TRANSPORT_PREFERENCE_LOCK = threading.Lock()
 
+# Reuse a small number of HTTPS sessions for DoH. A fresh TCP+TLS handshake for
+# every DNS query is expensive and makes transient network resets much more
+# visible. Borrowed connections are never shared concurrently between threads.
+MAX_DOH_CONNECTIONS_PER_ENDPOINT = 4
+_DOH_POOL: dict[str, list[http.client.HTTPSConnection]] = {}
+_DOH_POOL_LOCK = threading.Lock()
+
 # Keep the application-level DNS cache intentionally small. It exists to absorb
 # repeat lookups, not to become an unbounded recursive-resolver cache.
 MAX_DNS_CACHE_ENTRIES = 4096
 MAX_DNS_CACHE_RESPONSE_BYTES = 8192
 MAX_DNS_CACHE_TTL_SECONDS = 300.0
 MAX_INFLIGHT_QUERIES_PER_CONNECTION = 64
+MAX_GLOBAL_INFLIGHT_QUERIES = 256
 MAX_DNS_NAME_POINTER_JUMPS = 32
+DOT_CLIENT_IDLE_TIMEOUT_SECONDS = 300.0
 DOT_TLS_HANDSHAKE_TIMEOUT_SECONDS = 5.0
 DOT_TLS_SHUTDOWN_TIMEOUT_SECONDS = 1.0
+DOT_RESTART_INITIAL_SECONDS = 1.0
+DOT_RESTART_MAX_SECONDS = 30.0
 _DNS_CACHE: dict[tuple[str, str, str, bytes], tuple[bytes, float]] = {}
 _DNS_CACHE_LOCK = threading.Lock()
 
@@ -276,50 +287,124 @@ def send_udp_query(endpoint: UpstreamEndpoint, payload: bytes, timeout: float) -
         raise
 
 
-def send_doh_query(endpoint: UpstreamEndpoint, payload: bytes, timeout: float) -> bytes:
-    """Send an RFC 8484 DNS message using HTTPS POST."""
-    if not endpoint.is_doh:
-        raise ValueError("send_doh_query requires an HTTPS DoH endpoint.")
-
-    connection = http.client.HTTPSConnection(
+def _new_doh_connection(
+    endpoint: UpstreamEndpoint, timeout: float
+) -> http.client.HTTPSConnection:
+    return http.client.HTTPSConnection(
         endpoint.host,
         endpoint.port,
         timeout=max(0.2, float(timeout)),
         context=ssl.create_default_context(),
     )
-    try:
-        connection.request(
-            "POST",
-            endpoint.request_target,
-            body=payload,
-            headers={
-                "Accept": "application/dns-message",
-                "Content-Type": "application/dns-message",
-                "Content-Length": str(len(payload)),
-                "User-Agent": "DNS-Dashboard/4.1",
-            },
-        )
-        response = connection.getresponse()
-        if response.status != 200:
-            response.read(512)
-            raise OSError(
-                f"DoH upstream {endpoint.key} returned HTTP {response.status}."
-            )
-        content_type = (response.getheader("Content-Type") or "").split(";", 1)[0].strip().lower()
-        if content_type and content_type != "application/dns-message":
-            response.read(512)
-            raise OSError(
-                f"DoH upstream {endpoint.key} returned unsupported content type {content_type}."
-            )
-        body = response.read(MAX_DNS_MESSAGE_BYTES + 1)
-        if len(body) > MAX_DNS_MESSAGE_BYTES:
-            raise OSError("DoH upstream response exceeds the maximum DNS message size.")
-        _validate_upstream_response(payload, body)
-        return body
-    except (http.client.HTTPException, ssl.SSLError) as exc:
-        raise OSError(f"DoH request to {endpoint.key} failed: {exc}") from exc
-    finally:
+
+
+def _borrow_doh_connection(
+    endpoint: UpstreamEndpoint, timeout: float
+) -> http.client.HTTPSConnection:
+    with _DOH_POOL_LOCK:
+        pool = _DOH_POOL.get(endpoint.key)
+        connection = pool.pop() if pool else None
+    if connection is None:
+        return _new_doh_connection(endpoint, timeout)
+    connection.timeout = max(0.2, float(timeout))
+    sock = getattr(connection, "sock", None)
+    if sock is not None:
+        try:
+            sock.settimeout(connection.timeout)
+        except OSError:
+            connection.close()
+            return _new_doh_connection(endpoint, timeout)
+    return connection
+
+
+def _return_doh_connection(
+    endpoint: UpstreamEndpoint, connection: http.client.HTTPSConnection
+) -> None:
+    if getattr(connection, "sock", None) is None:
         connection.close()
+        return
+    with _DOH_POOL_LOCK:
+        pool = _DOH_POOL.setdefault(endpoint.key, [])
+        if len(pool) < MAX_DOH_CONNECTIONS_PER_ENDPOINT:
+            pool.append(connection)
+            return
+    connection.close()
+
+
+def _discard_doh_connection(connection: http.client.HTTPSConnection) -> None:
+    try:
+        connection.close()
+    except OSError:
+        pass
+
+
+def send_doh_query(endpoint: UpstreamEndpoint, payload: bytes, timeout: float) -> bytes:
+    """Send an RFC 8484 DNS message using a reusable HTTPS/1.1 connection.
+
+    A stale pooled socket is retried once with a fresh TLS connection inside the
+    original timeout budget. This covers normal upstream keep-alive expiry and
+    transient reverse-proxy resets without turning one reset into DNS failure.
+    """
+    if not endpoint.is_doh:
+        raise ValueError("send_doh_query requires an HTTPS DoH endpoint.")
+
+    deadline = time.monotonic() + max(0.2, float(timeout))
+    last_error: BaseException | None = None
+
+    for _attempt in range(2):
+        connection = _borrow_doh_connection(endpoint, _remaining_timeout(deadline))
+        reusable = False
+        try:
+            connection.request(
+                "POST",
+                endpoint.request_target,
+                body=payload,
+                headers={
+                    "Accept": "application/dns-message",
+                    "Content-Type": "application/dns-message",
+                    "Content-Length": str(len(payload)),
+                    "Connection": "keep-alive",
+                    "Accept-Encoding": "identity",
+                    "User-Agent": "DNS-Dashboard/4.2",
+                },
+            )
+            response = connection.getresponse()
+            if response.status != 200:
+                response.read(512)
+                raise OSError(
+                    f"DoH upstream {endpoint.key} returned HTTP {response.status}."
+                )
+            content_type = (
+                (response.getheader("Content-Type") or "")
+                .split(";", 1)[0]
+                .strip()
+                .lower()
+            )
+            if content_type and content_type != "application/dns-message":
+                response.read(512)
+                raise OSError(
+                    f"DoH upstream {endpoint.key} returned unsupported content type {content_type}."
+                )
+            body = response.read(MAX_DNS_MESSAGE_BYTES + 1)
+            if len(body) > MAX_DNS_MESSAGE_BYTES:
+                raise OSError("DoH upstream response exceeds the maximum DNS message size.")
+            _validate_upstream_response(payload, body)
+            reusable = not bool(getattr(response, "will_close", False))
+            if reusable:
+                _return_doh_connection(endpoint, connection)
+            else:
+                _discard_doh_connection(connection)
+            return body
+        except (OSError, http.client.HTTPException, ssl.SSLError) as exc:
+            last_error = exc
+            _discard_doh_connection(connection)
+            if time.monotonic() >= deadline:
+                break
+
+    assert last_error is not None
+    if isinstance(last_error, (socket.timeout, TimeoutError)):
+        raise socket.timeout(f"DoH request to {endpoint.key} timed out.") from last_error
+    raise OSError(f"DoH request to {endpoint.key} failed: {last_error}") from last_error
 
 
 def send_upstream_query(endpoint: UpstreamEndpoint, payload: bytes, timeout: float) -> bytes:
@@ -479,6 +564,23 @@ def build_servfail_response(payload: bytes, question_end: int | None = None) -> 
     return build_dns_response(payload, rcode=2, question_end=question_end)
 
 
+def _configure_stream_socket(writer: asyncio.StreamWriter) -> None:
+    sock = writer.get_extra_info("socket")
+    if sock is None:
+        return
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+        if hasattr(socket, "TCP_KEEPINTVL"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+        if hasattr(socket, "TCP_KEEPCNT"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+    except OSError:
+        # Keepalive tuning is best-effort and platform dependent.
+        pass
+
+
 async def handle_dot(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
@@ -486,8 +588,10 @@ async def handle_dot(
     runtime: RuntimeState,
     profiles: ProfileStore,
     blocklists: BlocklistManager,
+    query_slots: asyncio.Semaphore | None = None,
 ) -> None:
     runtime.connection_delta(1)
+    _configure_stream_socket(writer)
     write_lock = asyncio.Lock()
     tasks: set[asyncio.Task] = set()
 
@@ -506,7 +610,15 @@ async def handle_dot(
                     profile, domain, qtype_class, payload[:2]
                 )
                 if response is None:
-                    response = await forward_dns_query(payload, profile, runtime, settings)
+                    if query_slots is None:
+                        response = await forward_dns_query(
+                            payload, profile, runtime, settings
+                        )
+                    else:
+                        async with query_slots:
+                            response = await forward_dns_query(
+                                payload, profile, runtime, settings
+                            )
                     cache_dns_response(
                         profile, domain, qtype_class, response, question_end
                     )
@@ -520,6 +632,8 @@ async def handle_dot(
 
         try:
             async with write_lock:
+                if writer.is_closing():
+                    return
                 writer.write(len(response).to_bytes(2, "big") + response)
                 await writer.drain()
             runtime.record_query(blocked=blocked)
@@ -531,7 +645,9 @@ async def handle_dot(
     try:
         while True:
             try:
-                header = await asyncio.wait_for(reader.readexactly(2), timeout=60.0)
+                header = await asyncio.wait_for(
+                    reader.readexactly(2), timeout=DOT_CLIENT_IDLE_TIMEOUT_SECONDS
+                )
             except asyncio.TimeoutError:
                 break
             except asyncio.IncompleteReadError as exc:
@@ -561,6 +677,8 @@ async def handle_dot(
     except Exception as exc:
         runtime.record_dns_error(classify_dns_error(exc), redact_text(str(exc), settings))
     finally:
+        for task in tuple(tasks):
+            task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         runtime.connection_delta(-1)
@@ -589,15 +707,23 @@ async def run_dot_server(
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(settings.dot_cert_file, settings.dot_key_file)
+    query_slots = asyncio.Semaphore(MAX_GLOBAL_INFLIGHT_QUERIES)
     server = await asyncio.start_server(
         lambda reader, writer: handle_dot(
-            reader, writer, settings, runtime, profiles, blocklists
+            reader,
+            writer,
+            settings,
+            runtime,
+            profiles,
+            blocklists,
+            query_slots,
         ),
         host=settings.dot_bind_host,
         port=settings.dot_port,
         ssl=context,
         ssl_handshake_timeout=DOT_TLS_HANDSHAKE_TIMEOUT_SECONDS,
         ssl_shutdown_timeout=DOT_TLS_SHUTDOWN_TIMEOUT_SECONDS,
+        backlog=256,
     )
     runtime.update(dot_state="running", dot_last_error=None)
     startup_complete.set()
@@ -620,7 +746,9 @@ async def run_dot_server(
                     if current_mtime > last_mtime:
                         certificate = prepare_tls_material(settings)
                         if certificate.valid:
-                            context.load_cert_chain(settings.dot_cert_file, settings.dot_key_file)
+                            context.load_cert_chain(
+                                settings.dot_cert_file, settings.dot_key_file
+                            )
                             runtime.update(certificate=certificate.as_public())
                             last_mtime = current_mtime
                         else:
@@ -636,6 +764,9 @@ async def run_dot_server(
             await server.serve_forever()
     finally:
         monitor_task.cancel()
+        await asyncio.gather(monitor_task, return_exceptions=True)
+        server.close()
+        await server.wait_closed()
 
 
 def start_dot_thread(
@@ -656,17 +787,33 @@ def start_dot_thread(
         certificate = prepare_tls_material(settings)
         runtime.update(certificate=certificate.as_public())
         if not certificate.valid:
-            runtime.update(dot_state="certificate-error", dot_last_error=certificate.error)
+            runtime.update(
+                dot_state="certificate-error", dot_last_error=certificate.error
+            )
             startup_complete.set()
             return
-        try:
-            asyncio.run(
-                run_dot_server(settings, runtime, profiles, blocklists, startup_complete)
-            )
-        except Exception as exc:
-            safe_error = redact_text(str(exc), settings)
-            runtime.update(dot_state="failed", dot_last_error=safe_error)
-            startup_complete.set()
 
-    threading.Thread(target=runner, daemon=True).start()
+        backoff = DOT_RESTART_INITIAL_SECONDS
+        first_attempt = True
+        while True:
+            try:
+                runtime.update(
+                    dot_state="starting" if first_attempt else "restarting",
+                    dot_last_error=None if first_attempt else runtime.snapshot().get("dot_last_error"),
+                )
+                asyncio.run(
+                    run_dot_server(
+                        settings, runtime, profiles, blocklists, startup_complete
+                    )
+                )
+                raise RuntimeError("DoT listener stopped unexpectedly.")
+            except Exception as exc:
+                safe_error = redact_text(str(exc), settings)
+                runtime.update(dot_state="restarting", dot_last_error=safe_error)
+                startup_complete.set()
+                first_attempt = False
+                time.sleep(backoff)
+                backoff = min(DOT_RESTART_MAX_SECONDS, backoff * 2)
+
+    threading.Thread(target=runner, name="dot-server", daemon=True).start()
     return startup_complete

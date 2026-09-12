@@ -40,6 +40,14 @@ class DnsTransportTests(unittest.TestCase):
     def setUp(self) -> None:
         with dns_service._TRANSPORT_PREFERENCE_LOCK:
             dns_service._TRANSPORT_PREFERENCE.clear()
+        with dns_service._DOH_POOL_LOCK:
+            for pool in dns_service._DOH_POOL.values():
+                for connection in pool:
+                    try:
+                        connection.close()
+                    except OSError:
+                        pass
+            dns_service._DOH_POOL.clear()
 
     def test_udp_timeout_falls_back_to_tcp_and_remembers_tcp(self) -> None:
         endpoint = UpstreamEndpoint("1.1.1.1", 53)
@@ -109,7 +117,7 @@ class DnsTransportTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 parse_upstream_servers(value)
 
-    def test_doh_uses_binary_dns_https_post(self) -> None:
+    def test_doh_uses_binary_dns_https_post_and_reuses_connection(self) -> None:
         endpoint = parse_upstream_servers("https://dns.google/dns-query")[0]
         query = dns_query()
         body = query[:2] + b"\x81\x80" + query[4:]
@@ -117,15 +125,21 @@ class DnsTransportTests(unittest.TestCase):
         http_response.status = 200
         http_response.getheader.return_value = "application/dns-message"
         http_response.read.return_value = body
+        http_response.will_close = False
         connection = mock.Mock()
+        connection.sock = mock.Mock()
         connection.getresponse.return_value = http_response
 
         with mock.patch(
             "dns_service.http.client.HTTPSConnection", return_value=connection
-        ), mock.patch("dns_service.ssl.create_default_context", return_value=mock.Mock()):
+        ) as constructor, mock.patch(
+            "dns_service.ssl.create_default_context", return_value=mock.Mock()
+        ):
+            self.assertEqual(send_doh_query(endpoint, query, 2.0), body)
             self.assertEqual(send_doh_query(endpoint, query, 2.0), body)
 
-        connection.request.assert_called_once()
+        self.assertEqual(constructor.call_count, 1)
+        self.assertEqual(connection.request.call_count, 2)
         args, kwargs = connection.request.call_args
         self.assertEqual(args[0], "POST")
         self.assertEqual(args[1], "/dns-query")
@@ -134,7 +148,43 @@ class DnsTransportTests(unittest.TestCase):
         self.assertEqual(
             kwargs["headers"]["Content-Type"], "application/dns-message"
         )
-        connection.close.assert_called_once()
+        self.assertEqual(kwargs["headers"]["Connection"], "keep-alive")
+        connection.close.assert_not_called()
+        with dns_service._DOH_POOL_LOCK:
+            self.assertEqual(dns_service._DOH_POOL[endpoint.key], [connection])
+
+    def test_doh_stale_keepalive_retries_with_fresh_connection(self) -> None:
+        endpoint = parse_upstream_servers("https://dns.google/dns-query")[0]
+        query = dns_query()
+        body = query[:2] + b"\x81\x80" + query[4:]
+
+        stale = mock.Mock()
+        stale.sock = mock.Mock()
+        stale.request.side_effect = BrokenPipeError("stale keep-alive")
+        with dns_service._DOH_POOL_LOCK:
+            dns_service._DOH_POOL[endpoint.key] = [stale]
+
+        http_response = mock.Mock()
+        http_response.status = 200
+        http_response.getheader.return_value = "application/dns-message"
+        http_response.read.return_value = body
+        http_response.will_close = False
+        fresh = mock.Mock()
+        fresh.sock = mock.Mock()
+        fresh.getresponse.return_value = http_response
+
+        with mock.patch(
+            "dns_service.http.client.HTTPSConnection", return_value=fresh
+        ) as constructor, mock.patch(
+            "dns_service.ssl.create_default_context", return_value=mock.Mock()
+        ):
+            self.assertEqual(send_doh_query(endpoint, query, 2.0), body)
+
+        stale.close.assert_called_once()
+        constructor.assert_called_once()
+        fresh.request.assert_called_once()
+        with dns_service._DOH_POOL_LOCK:
+            self.assertEqual(dns_service._DOH_POOL[endpoint.key], [fresh])
 
     def test_doh_endpoint_bypasses_classic_udp_transport(self) -> None:
         endpoint = parse_upstream_servers("https://dns.google/dns-query")[0]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hmac
 import json
+import socket
 import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,6 +20,7 @@ from tls_manager import install_tls_material
 class DashboardHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = 128
 
 
 def build_handler(
@@ -31,8 +33,9 @@ def build_handler(
     restart_callback: Callable[[], None] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     class DashboardHandler(BaseHTTPRequestHandler):
-        server_version = "DnsDashboard/4.0"
+        server_version = "DnsDashboard/4.2"
         sys_version = ""
+        protocol_version = "HTTP/1.1"
         static_routes = {
             "/": ("index.html", "text/html; charset=utf-8"),
             "/app.js": ("app.js", "text/javascript; charset=utf-8"),
@@ -41,6 +44,13 @@ def build_handler(
             "/styles.css": ("styles.css", "text/css; charset=utf-8"),
             "/settings.css": ("settings.css", "text/css; charset=utf-8"),
         }
+
+        def setup(self) -> None:
+            super().setup()
+            # Bound idle/slow clients so abandoned cloud/mobile connections do
+            # not consume a dashboard worker indefinitely. Polling happens every
+            # 15 seconds, so a 60-second keep-alive window is ample.
+            self.connection.settimeout(60.0)
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None
@@ -51,6 +61,7 @@ def build_handler(
             self.send_header("X-Frame-Options", "DENY")
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+            self.send_header("Keep-Alive", "timeout=30, max=100")
             self.send_header(
                 "Content-Security-Policy",
                 "default-src 'self'; script-src 'self'; style-src 'self'; "
@@ -78,6 +89,17 @@ def build_handler(
                 username, settings.dashboard_username
             ) and hmac.compare_digest(password, settings.dashboard_password)
 
+        def _safe_write(self, body: bytes) -> bool:
+            try:
+                self.wfile.write(body)
+                self.wfile.flush()
+                return True
+            except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
+                # Browser tabs and cloud proxies can disappear between header and
+                # body writes. This is a client disconnect, not a server failure.
+                self.close_connection = True
+                return False
+
         def _send_unauthorized(self) -> None:
             body = b"Authentication required."
             self.send_response(HTTPStatus.UNAUTHORIZED)
@@ -86,7 +108,7 @@ def build_handler(
             self._security_headers()
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            self._safe_write(body)
 
         def _same_origin(self) -> bool:
             origin = self.headers.get("Origin")
@@ -106,7 +128,7 @@ def build_handler(
             self._security_headers()
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            self._safe_write(body)
 
         def _serve_static(self, name: str, content_type: str) -> None:
             path = STATIC_ROOT / name
@@ -120,7 +142,7 @@ def build_handler(
             self._security_headers()
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            self._safe_write(body)
 
         def _read_json_body(self) -> dict[str, Any] | None:
             if not self._same_origin():
@@ -154,6 +176,9 @@ def build_handler(
                     {"ok": False, "error": f"Invalid JSON body: {exc}"},
                     HTTPStatus.BAD_REQUEST,
                 )
+                return None
+            except (TimeoutError, OSError):
+                self.close_connection = True
                 return None
             if not isinstance(data, dict):
                 self._json(
@@ -407,4 +432,7 @@ def run_http(
         restart_callback=restart_callback,
     )
     server = DashboardHTTPServer((settings.bind_host, settings.port), handler)
-    server.serve_forever()
+    try:
+        server.serve_forever(poll_interval=0.5)
+    finally:
+        server.server_close()

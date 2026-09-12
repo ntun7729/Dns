@@ -7,7 +7,7 @@ LABEL org.opencontainers.image.source="https://github.com/ntun7729/Dns"
 LABEL org.opencontainers.image.description="Provider-neutral dashboard-managed DNS-over-TLS service with FRPC exposure"
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl gosu openssl tar \
+    && apt-get install -y --no-install-recommends ca-certificates curl gosu openssl tar tini \
     && rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
@@ -63,10 +63,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN chmod 0755 /entrypoint.sh
 
-# The entrypoint begins as root only to prepare a potentially root-owned mounted
-# volume, then immediately drops to uid/gid 10001 with gosu before Python starts.
+# tini is PID 1 so child processes are reaped and termination signals are
+# forwarded predictably. The shell entrypoint still execs Python after preparing
+# the persistent volume and dropping privileges.
 EXPOSE 10000
 STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/bin/tini", "--"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '10000') + '/healthz', timeout=3)" || exit 1

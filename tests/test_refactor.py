@@ -24,7 +24,7 @@ from dns_service import (
     parse_dns_question,
 )
 from filtering import BlocklistManager
-from frpc_service import frpc_child_environment
+from frpc_service import frpc_child_environment, frpc_config
 from profiles import ProfileStore, parse_blocklist_text, validate_raw_github_url
 from runtime_config import RuntimeConfigStore
 from settings import Settings, UpstreamEndpoint, parse_upstream_servers
@@ -122,6 +122,33 @@ class RefactorTests(unittest.TestCase):
             self.assertNotIn(value, child_env.values())
         self.assertNotEqual(child_env["PATH"], parent_env["PATH"])
         self.assertNotEqual(child_env["SSL_CERT_FILE"], parent_env["SSL_CERT_FILE"])
+
+    def test_frpc_config_enables_reconnect_and_keepalive_defaults(self) -> None:
+        settings = Settings(
+            dot_enabled=True,
+            dot_bind_host="127.0.0.1",
+            dot_port=8853,
+            frpc_enabled=True,
+            frp_server_addr="203.0.113.10",
+            frp_server_port=7000,
+            frp_remote_port=853,
+            frp_auth_token="secret-token",
+        )
+        config = frpc_config(settings)
+        for expected in (
+            "loginFailExit = false",
+            "transport.tcpMux = true",
+            "transport.tcpMuxKeepaliveInterval = 15",
+            "transport.dialServerTimeout = 10",
+            "transport.dialServerKeepalive = 30",
+            "transport.heartbeatInterval = 10",
+            "transport.heartbeatTimeout = 90",
+            "transport.tls.enable = true",
+            'auth.method = "token"',
+            'remotePort = 853',
+        ):
+            self.assertIn(expected, config)
+        self.assertIn('auth.token = "secret-token"', config)
 
     def test_protocol_error_responses_preserve_transaction(self) -> None:
         query = dns_query()
@@ -267,6 +294,7 @@ class RefactorTests(unittest.TestCase):
         handler = build_handler(
             self.settings, self.runtime, self.profiles, self.blocklists
         )
+        self.assertEqual(handler.protocol_version, "HTTP/1.1")
         self.assertIn("/app.js", handler.static_routes)
         self.assertIn("/settings.js", handler.static_routes)
         self.assertNotIn("/api/status", handler.static_routes)
