@@ -190,7 +190,7 @@ jobs:
             [ -f "$cert" ] && cat "$cert" >> "$tmp/untrusted.pem"
           done
           echo "=== Verify using only ISRG Root X1 ==="
-          if openssl verify -no-CApath -CAfile "$tmp/isrg-root-x1.pem" -untrusted "$tmp/untrusted.pem" "$tmp/cert-1.pem"; then
+          if openssl verify -no-CApath -no-CAstore -CAfile "$tmp/isrg-root-x1.pem" -untrusted "$tmp/untrusted.pem" "$tmp/cert-1.pem"; then
             echo "ISRG ROOT X1 ONLY: PASS"
           else
             echo "ISRG ROOT X1 ONLY: FAIL"
