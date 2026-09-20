@@ -33,7 +33,6 @@ DEFAULT_CONFIG = {
     "enabled": False,
     "server_addr": "",
     "server_port": 7000,
-    "auth_token": "",
     "transport_tls": True,
     "proxies": {
         "dot": {"enabled": True, "type": "tcp", "local_port": 853, "remote_port": 853},
@@ -137,19 +136,9 @@ def validate_frp(payload: Mapping[str, Any], current: Mapping[str, Any] | None =
         "enabled": _bool(payload.get("enabled", base["enabled"]), "enabled"),
         "server_addr": _host(payload.get("server_addr", base["server_addr"])),
         "server_port": _port(payload.get("server_port", base["server_port"]), "server_port"),
-        "auth_token": str(base.get("auth_token", "")),
         "transport_tls": _bool(payload.get("transport_tls", base["transport_tls"]), "transport_tls"),
         "proxies": {},
     }
-    if "auth_token" in payload:
-        token = str(payload.get("auth_token", ""))
-        if len(token) > 4096:
-            raise ValueError("FRP token is too long.")
-        if token:
-            result["auth_token"] = token
-    if _bool(payload.get("clear_auth_token", False), "clear_auth_token"):
-        result["auth_token"] = ""
-
     raw_proxies = payload.get("proxies", {})
     if raw_proxies is None:
         raw_proxies = {}
@@ -182,9 +171,6 @@ def render_frpc_toml(frp: Mapping[str, Any]) -> str:
         f"serverPort = {int(frp['server_port'])}",
         f"transport.tls.enable = {'true' if frp.get('transport_tls', True) else 'false'}",
     ]
-    token = str(frp.get("auth_token", ""))
-    if token:
-        lines.extend(["auth.method = \"token\"", f"auth.token = {_toml_string(token)}"])
     lines.append("")
     for name, proxy in frp.get("proxies", {}).items():
         if not proxy.get("enabled"):
@@ -252,7 +238,6 @@ class ConfigStore:
                     "enabled": old.get("frpc_enabled", False),
                     "server_addr": old.get("frp_server_addr", ""),
                     "server_port": old.get("frp_server_port", 7000),
-                    "auth_token": old.get("frp_auth_token", ""),
                     "transport_tls": True,
                     "proxies": {
                         "dot": {
@@ -281,6 +266,13 @@ class ConfigStore:
         raw = json.loads(self.path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict) or raw.get("format") != CONFIG_FORMAT:
             raise ValueError("Unsupported bridge configuration format.")
+        frp = raw.get("frp")
+        if isinstance(frp, dict) and "auth_token" in frp:
+            # Older bridge versions could persist FRP token authentication.
+            # This version does not support it; erase it on first read.
+            frp.pop("auth_token", None)
+            raw["updated_at"] = now_iso()
+            _safe_write(self.path, json.dumps(raw, indent=2, sort_keys=True) + "\n")
         return raw
 
     def _write(self, document: Mapping[str, Any]) -> None:
@@ -318,15 +310,12 @@ class ConfigStore:
     def public_config(self) -> dict[str, Any]:
         with self.lock:
             doc = self._read()
-        frp = json.loads(json.dumps(doc.get("frp", DEFAULT_CONFIG)))
-        token_configured = bool(frp.get("auth_token"))
-        frp.pop("auth_token", None)
+        frp = validate_frp(doc.get("frp", DEFAULT_CONFIG))
         return {
             "format": CONFIG_FORMAT,
             "setup_required": not bool(doc.get("admin", {}).get("username")),
             "username": str(doc.get("admin", {}).get("username", "")),
             "frp": frp,
-            "secrets": {"auth_token_configured": token_configured},
             "migration": doc.get("migration"),
             "updated_at": doc.get("updated_at"),
         }
@@ -347,7 +336,7 @@ class ConfigStore:
             "format": BACKUP_FORMAT,
             "exported_at": now_iso(),
             "config": doc,
-            "warning": "This backup may contain the FRP authentication token and bridge administrator password hash. Store it securely.",
+            "warning": "This backup contains FRP connection settings and the bridge administrator password hash. Store it securely.",
         }
 
     def import_backup(self, backup: Mapping[str, Any]) -> None:
@@ -382,7 +371,6 @@ class ConfigStore:
                     "enabled": old.get("frpc_enabled", False),
                     "server_addr": old.get("frp_server_addr", ""),
                     "server_port": old.get("frp_server_port", 7000),
-                    "auth_token": old.get("frp_auth_token", ""),
                     "transport_tls": True,
                     "proxies": {
                         "dot": {
