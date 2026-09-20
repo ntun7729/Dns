@@ -380,7 +380,7 @@ class ConfigStore:
     def public_config(self) -> dict[str, Any]:
         with self.lock:
             doc = self._read()
-        frp = validate_frp(doc.get("frp", DEFAULT_CONFIG))
+        frp = validate_frp(doc.get("frp", DEFAULT_CONFIG), require_server_addr=False)
         return {
             "format": CONFIG_FORMAT,
             "setup_required": not bool(doc.get("admin", {}).get("username")),
