@@ -882,7 +882,7 @@ class CertificateManager:
         labels = domain.rstrip(".").split(".")
         # Try the FQDN and then progressively shorter suffixes. The first
         # active Cloudflare zone returned is the most-specific matching zone.
-        for index in range(max(1, len(labels) - 10)):
+        for index in range(max(1, len(labels) - 1)):
             candidate = ".".join(labels[index:])
             if "." not in candidate:
                 continue
