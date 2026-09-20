@@ -908,6 +908,24 @@ class CertificateManager:
             raise ValueError("ACME client completed but certificate files were not found.")
         return cert, key, issuer if issuer.is_file() else None
 
+    def _build_lego_command(self, domain: str, email: str, first_issue: bool) -> list[str]:
+        # lego v5 makes the certificate/account/storage/challenge flags local
+        # to the "run" command. There is no separate "renew" command: "run"
+        # obtains a missing certificate and renews an existing one when due.
+        command = [
+            self.lego_binary,
+            "run",
+            "--email", email,
+            "--dns", "cloudflare",
+            "--domains", domain,
+            "--path", str(self.acme_dir),
+        ]
+        if first_issue:
+            command.append("--accept-tos")
+        else:
+            command.extend(["--renew-days", "30", "--no-random-sleep"])
+        return command
+
     def _run_cloudflare(self) -> None:
         with self.lock:
             cfg = self._read_config()
@@ -928,19 +946,7 @@ class CertificateManager:
             self.last_output = "Certificate is valid for more than 30 days; renewal is not due."
             return
 
-        # lego's account/provider/domain/path options are global CLI flags and
-        # must precede the run/renew subcommand. Renewal-specific flags follow it.
-        command = [
-            self.lego_binary,
-            "--email", email,
-            "--dns", "cloudflare",
-            "--domains", domain,
-            "--path", str(self.acme_dir),
-        ]
-        if first_issue:
-            command.extend(["--accept-tos", "run"])
-        else:
-            command.extend(["renew", "--days", "30", "--no-random-sleep"])
+        command = self._build_lego_command(domain, email, first_issue)
 
         env = {
             "PATH": "/usr/local/bin:/usr/bin:/bin",
