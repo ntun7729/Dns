@@ -1,13 +1,14 @@
 FROM technitium/dns-server:15.4.0
 
 ARG FRP_VERSION=0.71.0
+ARG LEGO_VERSION=5.5.1
 ARG TARGETARCH
 
 LABEL org.opencontainers.image.source="https://github.com/ntun7729/Dns"
-LABEL org.opencontainers.image.description="Technitium DNS Server with FRP bridge and cloud-container ingress"
+LABEL org.opencontainers.image.description="Technitium DNS Server with FRP bridge, ACME certificate automation, and cloud-container ingress"
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl nginx python3 tini tar \
+    && apt-get install -y --no-install-recommends ca-certificates curl nginx openssl python3 tini tar \
     && rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
@@ -28,6 +29,26 @@ RUN set -eux; \
     install -m 0755 "/tmp/frp_${FRP_VERSION}_linux_${frp_arch}/frpc" /usr/local/bin/frpc; \
     frpc --version; \
     rm -rf /tmp/frp* "/tmp/$archive"
+
+RUN set -eux; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "$arch" in \
+      amd64) lego_arch="amd64" ;; \
+      arm64) lego_arch="arm64" ;; \
+      *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    archive="lego_v${LEGO_VERSION}_linux_${lego_arch}.tar.gz"; \
+    release="https://github.com/go-acme/lego/releases/download/v${LEGO_VERSION}"; \
+    curl --proto '=https' --proto-redir '=https' -fsSL --retry 3 "$release/lego_${LEGO_VERSION}_checksums.txt" -o /tmp/lego_checksums.txt; \
+    curl --proto '=https' --proto-redir '=https' -fsSL --retry 3 "$release/$archive" -o "/tmp/$archive"; \
+    awk -v archive="$archive" '{ name=$2; sub(/^\*/, "", name); if (length($1)==64 && name==archive) { print tolower($1) "  /tmp/" archive; found++ } } END { if (found != 1) exit 1 }' /tmp/lego_checksums.txt > /tmp/lego.sha256; \
+    test -s /tmp/lego.sha256; \
+    sha256sum -c /tmp/lego.sha256; \
+    mkdir -p /tmp/lego-extract; \
+    tar -xzf "/tmp/$archive" -C /tmp/lego-extract; \
+    install -m 0755 /tmp/lego-extract/lego /usr/local/bin/lego; \
+    lego --version; \
+    rm -rf /tmp/lego* "/tmp/$archive"
 
 RUN mkdir -p /opt/dns-bridge /data/technitium /data/bridge /tmp/nginx-client /tmp/nginx-proxy
 COPY bridge/manager.py bridge/index.html /opt/dns-bridge/
