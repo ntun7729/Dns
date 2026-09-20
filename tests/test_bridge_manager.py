@@ -136,6 +136,8 @@ class BridgeTests(unittest.TestCase):
             status = certs.status()
             self.assertTrue(status["certificate_exists"])
             self.assertEqual(status["pfx_password"], "")
+            self.assertEqual(status["key_algorithm"], "RSA")
+            self.assertTrue(status["android_legacy_compatible"])
             subprocess.run(
                 [
                     "openssl", "pkcs12", "-in", status["pfx_path"],
@@ -153,19 +155,32 @@ class BridgeTests(unittest.TestCase):
             certs = CertificateManager(root_path / "bridge", root_path / "technitium", lego_binary="/usr/local/bin/lego")
             first = certs._build_lego_command("dns.example.com", "admin@example.com", True)
             renew = certs._build_lego_command("dns.example.com", "admin@example.com", False)
+            compat = certs._build_lego_command(
+                "dns.example.com", "admin@example.com", False, force_compat_reissue=True
+            )
 
             self.assertEqual(first[:2], ["/usr/local/bin/lego", "run"])
             self.assertGreater(first.index("--email"), first.index("run"))
             self.assertGreater(first.index("--dns"), first.index("run"))
             self.assertGreater(first.index("--domains"), first.index("run"))
             self.assertIn("--accept-tos", first)
+            self.assertIn("--key-type", first)
+            self.assertEqual(first[first.index("--key-type") + 1], "RSA2048")
             self.assertNotIn("renew", first)
 
             self.assertEqual(renew[:2], ["/usr/local/bin/lego", "run"])
+            self.assertIn("--key-type", renew)
+            self.assertEqual(renew[renew.index("--key-type") + 1], "RSA2048")
             self.assertIn("--renew-days", renew)
             self.assertIn("30", renew)
             self.assertIn("--no-random-sleep", renew)
             self.assertNotIn("renew", renew)
+
+            self.assertEqual(compat[:2], ["/usr/local/bin/lego", "run"])
+            self.assertIn("--key-type", compat)
+            self.assertEqual(compat[compat.index("--key-type") + 1], "RSA2048")
+            self.assertIn("--renew-force", compat)
+            self.assertNotIn("--renew-days", compat)
 
     def test_bridge_ui_preserves_dirty_form_values_during_polling(self):
         index = (Path(__file__).resolve().parents[1] / "bridge" / "index.html").read_text(encoding="utf-8")
