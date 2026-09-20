@@ -21,9 +21,7 @@ RUN set -eux; \
     release="https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}"; \
     curl --proto '=https' --proto-redir '=https' -fsSL --retry 3 "$release/frp_sha256_checksums.txt" -o /tmp/frp_sha256_checksums.txt; \
     curl --proto '=https' --proto-redir '=https' -fsSL --retry 3 "$release/$archive" -o "/tmp/$archive"; \
-    awk -v archive="$archive" '
-      { name=$2; sub(/^\*/, "", name); if (length($1)==64 && name==archive) { print tolower($1) "  /tmp/" archive; found++ } }
-      END { if (found != 1) exit 1 }' /tmp/frp_sha256_checksums.txt > /tmp/frp.sha256; \
+    awk -v archive="$archive" '{ name=$2; sub(/^\*/, "", name); if (length($1)==64 && name==archive) { print tolower($1) "  /tmp/" archive; found++ } } END { if (found != 1) exit 1 }' /tmp/frp_sha256_checksums.txt > /tmp/frp.sha256; \
     test -s /tmp/frp.sha256; \
     sha256sum -c /tmp/frp.sha256; \
     tar -xzf "/tmp/$archive" -C /tmp; \
