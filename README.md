@@ -1,269 +1,183 @@
-# DNS Dashboard
+# DNS Server — Technitium core + FRP bridge
 
-A self-hosted DNS-over-TLS service with a protected web dashboard, persistent DNS profiles, privacy-safe ad/tracker filtering, FRPC exposure, aggregate telemetry, and automatic multi-upstream failover.
+This repository is a deployment wrapper around **Technitium DNS Server 15.4.0**. The previous custom Python resolver has been removed. DNS recursion, forwarding, caching, DNSSEC, ad/malware blocking, zones, encrypted DNS, statistics, logs and the main web console are now handled by Technitium itself.
 
-## Dashboard-first configuration
+The only custom runtime component is a small FRP bridge manager used to expose DNS ports from container platforms that only provide HTTP ingress.
 
-Operational configuration is managed from the web dashboard. You do **not** need to edit Docker/hosting-provider environment variables for:
+## Why the architecture changed
 
-- Dashboard administrator credentials
-- Private DNS hostname
-- DoT enable/bind/port
-- TLS certificate and private key
-- FRPC enable/server/control port/public port/token
-- Upstream timeout and resolver cooldown behavior
-- History window
-- Blocklist refresh interval
-- Resolver profiles, strategies, filtering, manual rules, allowlists, and custom blocklist sources
+The old project implemented its own DNS transport, resolver pool, cache, filtering, TLS management, telemetry, profiles and web control plane. That duplicated mature DNS-server functionality and created too many failure paths.
 
-The Docker image is provider-neutral. Render, Railway, VPS Docker, Docker Compose, and other container services all run the same application image.
-
-## First run
-
-1. Deploy the container.
-2. Expose the HTTP dashboard port. The image defaults to `10000`; platforms such as Railway can inject `PORT` automatically.
-3. Open the web dashboard.
-4. The dashboard automatically opens **Settings** when no administrator exists.
-5. Create the dashboard administrator immediately.
-6. Sign in when the browser reloads.
-7. Configure the DoT hostname, FRPS connection, TLS certificate/key, and global resolver behavior in **Settings**.
-8. Configure upstream resolvers and filtering in **Profiles**.
-9. Click **Save settings and restart** when changing global service settings.
-
-The first-run setup endpoint is intentionally unauthenticated until an administrator is created, so claim a newly deployed dashboard before sharing its URL.
-
-## Persistent storage
-
-The standard persistent data location is:
+The new architecture is deliberately smaller:
 
 ```text
-/data/dns-dashboard
+Browser
+  -> hosting HTTPS endpoint
+  -> nginx
+       -> /                  -> Technitium web console :5380
+       -> /dns-query         -> optional Technitium DNS-over-HTTP :8053
+       -> /_bridge/          -> FRP bridge manager :9080
+
+DNS clients
+  -> public FRPS server
+  -> FRPC outbound tunnel from this container
+  -> Technitium listeners on localhost/container network
+       TCP/UDP 53   normal DNS
+       TCP 853      DNS-over-TLS
+       UDP 853      DNS-over-QUIC
 ```
 
-It contains dashboard configuration, the scrypt password hash, profiles, TLS files, and generated FRPC configuration. Secret files use restrictive permissions.
+Technitium remains the DNS engine. FRP only transports packets to it.
 
-For plain Docker:
+## What you configure where
 
-```bash
-docker run -d \
-  --name dns-dashboard \
-  --restart unless-stopped \
-  -p 10000:10000 \
-  -v dns-dashboard-data:/data \
-  ghcr.io/ntun7729/dns:latest
-```
+### Technitium console: `/`
 
-Or use the included Compose file:
+Use the normal Technitium web console for:
 
-```bash
-docker compose up -d
-```
+- Recursive DNS or forwarders
+- DNS-over-TLS / DNS-over-HTTPS / DNS-over-QUIC
+- DNSSEC validation
+- Cache, serve-stale and prefetch behavior
+- Blocklists, allowed zones and blocked zones
+- Authoritative/forward/stub zones
+- Apps
+- Query logging and dashboard statistics
+- Users, permissions, 2FA, API tokens and clustering
+- Technitium backup and restore
 
-The container starts its entrypoint as root only long enough to create/fix ownership of its application data directory, then immediately runs the Python service as the unprivileged `app` user.
+The wrapper initializes and expects Technitium's internal web console at `127.0.0.1:5380` so nginx can be the single HTTP ingress. Keep that internal bind/port unchanged; operational DNS settings otherwise stay under Technitium's control.
 
-### Storage path detection
+### FRP bridge: `/_bridge/`
 
-The application resolves storage in this order:
+The bridge page manages:
 
-1. `DNS_DASHBOARD_DATA_DIR` if explicitly supplied as an infrastructure-only override.
-2. Railway's automatically supplied `RAILWAY_VOLUME_MOUNT_PATH`, with `/dns-dashboard` appended.
-3. `/data/dns-dashboard` for normal Docker and other providers.
-4. `/tmp/dns-dashboard` only if the selected persistent path cannot be written.
+- FRPC on/off
+- FRPS hostname/IP and control port
+- FRP token
+- TLS for the FRPC control connection
+- DoT TCP 853 publication
+- DoQ UDP 853 publication
+- Plain DNS TCP/UDP 53 publication
+- FRPC process status and recent logs
+- Bridge backup/restore
 
-`DNS_DASHBOARD_DATA_DIR` is not DNS/service configuration. It is only needed on a provider whose persistent disk cannot be mounted at `/data` and does not expose an automatic volume path.
+The bridge has its own small administrator account. This avoids storing Technitium credentials or API tokens in the bridge process.
 
-If Settings reports that fallback storage is being used, attach/configure a persistent volume before relying on local persistence.
+## Backups
 
-## Railway
+There are now **two intentionally separate backups**:
 
-Railway automatically detects the root `Dockerfile`, injects the HTTP `PORT`, and exposes an attached volume's mount path to the application. The service therefore does not require Railway variables for normal DNS configuration.
+1. **Technitium backup** — use Technitium's Settings backup/restore. It can include DNS/web settings, zones, allowed/blocked zones, blocklists, apps, DHCP scopes, statistics and logs.
+2. **Bridge backup** — open `/_bridge/` and download the bridge backup. It contains FRP settings and the bridge administrator hash. It may contain the FRP token, so keep it private.
 
-Recommended setup:
+This is safer than a custom DNS backup format because Technitium owns and restores its own state.
 
-1. Create a service from this GitHub repository.
-2. Let Railway build the root `Dockerfile`.
-3. Generate a public HTTP domain for the dashboard.
-4. Set the healthcheck path to `/healthz`.
-5. Attach a Railway Volume. `/data` is the recommended mount path, although the application also detects Railway's actual volume mount path automatically.
-6. Open the dashboard and complete configuration there.
+### Migration from the old repository
 
-Railway volumes persist across deployments and restarts. A service using a volume can have a short redeployment interruption because Railway does not mount the same volume into two active deployments simultaneously.
+If `/data/dns-dashboard/config.json` from the old deployment is still present and no new bridge config exists, the bridge automatically imports:
 
-## Render
+- old bridge administrator username/password hash
+- FRP enabled state
+- FRPS address/control port/token
+- old local DoT port
+- old FRP public DoT port
 
-`render.yaml` remains as an optional Render deployment definition, not as the architecture of the project.
+It does **not** delete the legacy files.
 
-For Render:
+The bridge restore endpoint also accepts the old `dns-dashboard-backup-v1` JSON format and extracts the FRP settings from it.
 
-1. Deploy as a Docker web service.
-2. Use `/healthz` for the health check.
-3. Attach a persistent disk and mount it at `/data` when your Render plan supports disks.
-4. Configure DNS, FRPC, TLS, filtering, profiles, and dashboard credentials from the web dashboard.
+Old resolver profiles/blocklists are not automatically translated into Technitium because the two DNS engines use different configuration models. Configure those once in the Technitium console, then use Technitium's native backup from that point forward.
 
-If the selected Render plan does not provide persistent disk storage, use **Settings → Export full backup** after important changes. Local filesystem state on an ephemeral service can be lost on replacement/redeploy.
+## Render deployment
 
-## Other Docker hosting services
+1. Create a Render Web Service from this repository.
+2. Use the root Dockerfile.
+3. Health check path: `/_healthz`.
+4. Open the Render URL. `/` is the Technitium console.
+5. Open `/_bridge/` and configure your FRPS server.
+6. Inside Technitium, enable the DNS protocols that you intend to publish through FRP.
 
-The service works on a container host when it provides:
+`render.yaml` contains the basic web-service definition.
 
-- A Linux Docker-compatible runtime
-- An HTTP port exposed to the dashboard
-- Outbound TCP access to the configured FRPS server and upstream DNS resolvers
-- A writable filesystem
-- Preferably a persistent volume mounted at `/data`
+### Important Render Free limitation
 
-No inbound public DoT port is required on the container platform when FRPC is enabled: FRPC makes an outbound connection to your public FRPS server and exposes the loopback DoT listener through that server.
+A free Render web service can spin down when Render considers the HTTP service idle. FRP/DNS traffic does not arrive through Render's HTTP ingress, so it should not be treated as activity that reliably keeps a free web service awake. When the container sleeps, FRPC and DNS stop too.
 
-If a provider forces persistent storage to a different path, set only:
+For an always-on public resolver, use an always-on container/VM. This repository still supports Render because it is useful for testing and non-critical deployments.
+
+## DNS-over-HTTPS through the hosting HTTPS endpoint
+
+nginx reserves `/dns-query` and forwards it to `127.0.0.1:8053`.
+
+To use it, enable Technitium's optional **DNS-over-HTTP** listener on port `8053`. The hosting provider terminates public HTTPS and nginx forwards the request over localhost HTTP, so the public endpoint is still DoH:
 
 ```text
-DNS_DASHBOARD_DATA_DIR=/provider/mount/path/dns-dashboard
+https://your-service.example/dns-query
 ```
 
-All actual DNS/service settings remain dashboard-managed.
+If the 8053 listener is disabled, `/dns-query` will return a gateway error while the web console continues to work normally.
 
-## Architecture
+## FRPS requirements
+
+Your public FRPS host must allow the remote ports you enable. For a typical Android Private DNS deployment:
 
 ```text
 Android Private DNS
-  -> your DNS hostname:853
-  -> DNS-only A/AAAA record
-  -> public FRPS endpoint
-  -> outbound FRPC tunnel from this container
-  -> local DoT listener (default 127.0.0.1:8853)
-  -> active DNS profile
-       -> allowlist / manual blocklist / downloaded blocklists
-       -> upstream resolver pool
+  -> dns.example.com:853 TCP
+  -> FRPS public :853 TCP
+  -> FRP tunnel
+  -> Technitium :853 TCP
 ```
 
-The HTTP dashboard and DNS-over-TLS listener are separate. Your hosting platform exposes the dashboard over HTTP/HTTPS; FRPC exposes only the loopback DoT listener through the public FRPS server.
+For normal DNS, publish both UDP and TCP 53. For DoQ, publish UDP 853.
 
-## Dashboard sections
+Low ports such as 53 may require FRPS to run with appropriate privileges/capabilities on the public host.
 
-### Overview
-
-Shows service readiness, DoT/FRPC/certificate state, aggregate DNS counters, filtering status, active profile, public/local endpoints, and actionable failures.
-
-### Analytics
-
-Shows bounded in-memory history for queries, blocked queries, errors, and upstream latency. Queried domain names and client IP addresses are not retained in history.
-
-### Profiles
-
-Each profile contains:
-
-- Upstream resolver list
-- `primary_failover` or `round_robin` strategy
-- Filtering enabled/disabled
-- Filtering preset
-- Custom raw-GitHub blocklist sources
-- Manual blocklist
-- Allowlist
-
-Profile edits apply immediately and are saved automatically to dashboard storage. Profiles can also be exported/imported independently.
-
-### Resolvers
-
-Shows per-upstream successes, failures, timeouts, latest/average latency, cooldown health, and last successful use.
-
-### Settings
-
-Controls global service configuration, TLS material, FRPC, administrator credentials, storage status, and full backup/restore. Global listener/FRPC changes trigger a controlled self-restart after the HTTP response is returned.
-
-### Diagnostics
-
-Surfaces certificate renewal, FRPC, upstream, DNS-processing, authentication, and blocklist update issues.
-
-## DNS reliability and resource protections
-
-- Concurrent request processing on long-lived DoT connections
-- 60-second idle connection timeout
-- 5-second incomplete-query timeout
-- Maximum 64 in-flight DNS requests per client connection
-- UDP upstream queries with automatic TCP retry on truncated responses
-- Multi-upstream health/cooldown/failover tracking
-- Resolver hostname cache with direct-IP bypass
-- Bounded DNS response cache (maximum 4096 entries)
-- Maximum 5-minute cached-answer lifetime
-- DNS cache scoped to profile ID and profile revision
-- Maximum 8 KiB response size for application-level caching
-- TLS certificate/key validation before a dashboard upload replaces active files
-- TLS certificate hot reload while DoT is running
-- Inactive downloaded blocklist caches are pruned
-
-## Filtering and privacy
-
-The bundled downloaded preset is **HaGeZi Light**. The active profile can also merge up to five custom HTTPS `raw.githubusercontent.com` lists. The allowlist overrides downloaded and manual block rules.
-
-Privacy behavior:
-
-- A queried domain is inspected only for the current request/filter decision.
-- Queried domains are not stored in dashboard history.
-- Client IP addresses are not displayed or retained by the dashboard.
-- Only aggregate query, blocked, error, latency, connection, and failover telemetry is retained.
-
-## TLS
-
-In production, upload a publicly trusted certificate chain and matching private key from **Settings → TLS certificate**. The server validates PEM decoding, key matching, hostname/SAN matching, validity start, and expiry before replacing the active files.
-
-For Android Private DNS, use a publicly trusted certificate for the exact provider hostname.
-
-## Authentication and backups
-
-New administrator passwords are stored as salted scrypt hashes. The status/settings APIs never return the FRP token or TLS private key.
-
-**Settings → Export full backup** is the deliberate exception because it is a disaster-recovery export and can include the FRP token and TLS private key. Store that backup like a credential.
-
-## Status and control endpoints
-
-| Endpoint | Purpose |
-| --- | --- |
-| `/` | Web dashboard |
-| `/healthz` | HTTP process liveness; unauthenticated |
-| `/readyz` | DoT/certificate/FRPC readiness; unauthenticated |
-| `/api/status` | Operational status/aggregate telemetry |
-| `/api/control` | Profile controls |
-| `/api/control/export` | Profile-only export |
-| `/api/settings` | Dashboard-managed service configuration; secrets redacted |
-| `/api/settings/export` | Sensitive full backup |
-| `/api/setup` | One-time administrator creation while unconfigured |
-
-Authenticated routes use HTTP Basic authentication behind the hosting platform's HTTPS dashboard endpoint.
-
-## Existing deployment migration
-
-The old environment-variable parser remains as a compatibility migration path. If persistent `config.json` does not exist, the first v4 start imports existing values into dashboard storage, including existing dashboard credentials and FRP configuration. Legacy TLS PEM/base64 values are copied into dashboard TLS files if those files do not already exist.
-
-After migration, edit operational values from the web dashboard instead of provider variables.
-
-## Local development
+## Local Docker
 
 ```bash
-docker build -t dns-dashboard .
-docker run --rm \
-  -p 10000:10000 \
-  -v dns-dashboard-data:/data \
-  -e APP_ENV=development \
-  dns-dashboard
+docker compose up -d --build
 ```
 
-Open `http://localhost:10000`.
+Open:
 
-## Tests and image publication
+```text
+http://localhost:10000/
+http://localhost:10000/_bridge/
+```
+
+A named volume persists all state under `/data`.
+
+## Persistent paths
+
+```text
+/data/technitium   Technitium configuration/state
+/data/bridge       FRP bridge configuration
+/data/dns-dashboard  legacy location, read only for one-time migration when present
+```
+
+Infrastructure-only path overrides are available in `.env.example`. DNS and FRP operational values should be changed from the web interfaces, not deployment environment variables.
+
+## Versions
+
+The image intentionally pins major runtime dependencies for repeatable deployments:
+
+- Technitium DNS Server: `15.4.0`
+- FRP client: `0.71.0`
+
+Dependency upgrades should be tested and committed rather than silently arriving from `latest`.
+
+## Development checks
 
 ```bash
 python -m unittest discover -s tests -v
-node --check app/static/app.js
-node --check app/static/ui_fixes.js
-node --check app/static/settings.js
+python -m py_compile bridge/manager.py
 sh -n scripts/entrypoint.sh
 ```
 
-GitHub Actions compiles the Python modules, runs unit/integration tests, validates dashboard JavaScript and the entrypoint, then builds/publishes the GHCR Docker image only after the test job passes.
+GitHub Actions runs these checks and then builds/publishes `linux/amd64` and `linux/arm64` images to GHCR.
 
-## Documentation
+## Upstream projects
 
-- [Deployment and operations guide](docs/DEPLOYMENT.md)
-- [Dashboard and reliability improvement plan](docs/DASHBOARD_ROADMAP.md)
-
-Never commit certificates, private keys, FRP tokens, dashboard backup files, or other deployment secrets to GitHub.
+Technitium DNS Server is developed by Technitium Software and licensed under GPL-3.0. FRP is developed by fatedier. This repository does not copy Technitium's DNS implementation; it packages the upstream DNS server as the runtime engine and adds deployment glue around it.

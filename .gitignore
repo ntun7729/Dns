@@ -1,12 +1,5 @@
-.env
 __pycache__/
-*.py[cod]
-.pytest_cache/
-*.pem
-*.key
-*.crt
-output/
-memory/
-data/
-*.broken.json
-dns-dashboard-backup-*.json
+*.pyc
+.env
+*.backup.json
+.DS_Store

@@ -1,16 +1,9 @@
 services:
   - type: web
-    name: dns-dashboard
+    name: dns-server
     runtime: docker
     autoDeploy: true
-    # Provider health checks verify that the container/web process is alive.
-    # They do not override free-tier sleep/idling policies; use an always-on
-    # service tier if the public DoT endpoint must remain continuously reachable.
-    healthCheckPath: /healthz
+    healthCheckPath: /_healthz
     envVars:
-      # Process bootstrap only. Operational DNS/FRPC/TLS/auth settings are
-      # created and edited from the web dashboard.
-      - key: APP_ENV
-        value: "production"
       - key: PORT
         value: "10000"

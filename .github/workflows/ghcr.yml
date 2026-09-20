@@ -1,92 +1,51 @@
-name: Test, build, and publish image
+name: Build and publish image
 
 on:
-  pull_request:
   push:
-    branches: ["main"]
-    tags: ["v*.*.*"]
+    branches: [main]
   workflow_dispatch:
 
-env:
-  IMAGE_NAME: ghcr.io/ntun7729/dns
+permissions:
+  contents: read
+  packages: write
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Compile all Python
-        run: python -m compileall -q app tests
-
-      - name: Run unit and integration tests
+      - name: Python tests
         run: python -m unittest discover -s tests -v
-
-      - name: Check dashboard JavaScript
+      - name: Syntax checks
         run: |
-          node --check app/static/app.js
-          node --check app/static/ui_fixes.js
-          node --check app/static/settings.js
+          python -m py_compile bridge/manager.py
+          sh -n scripts/entrypoint.sh
 
-      - name: Check entrypoint shell syntax
-        run: sh -n scripts/entrypoint.sh
-
-      - name: Verify production entrypoint
-        run: |
-          grep -F "exec python /app/app/application.py" scripts/entrypoint.sh
-          test -f app/application.py
-          test -f app/dns_service.py
-          test -f app/runtime_config.py
-          test -f app/tls_manager.py
-          test -f app/web_app.py
-          test -f app/static/settings.js
-          test -f app/static/settings.css
-
-  docker:
+  image:
     needs: test
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract image metadata
+      - uses: docker/metadata-action@v5
         id: meta
-        uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE_NAME }}
+          images: ghcr.io/${{ github.repository_owner }}/dns
           tags: |
-            type=ref,event=branch
-            type=ref,event=tag
-            type=sha,prefix=sha-
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-
-      - name: Build and publish
-        uses: docker/build-push-action@v6
+            type=raw,value=latest
+            type=sha
+      - uses: docker/build-push-action@v6
         with:
           context: .
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max

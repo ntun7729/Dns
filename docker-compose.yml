@@ -1,13 +1,17 @@
 services:
-  dns-dashboard:
+  dns-server:
     build: .
-    image: ghcr.io/ntun7729/dns:latest
+    container_name: dns-server
     restart: unless-stopped
-    init: true
     ports:
-      - "10000:10000"
+      - "10000:10000/tcp"
+      # FRP normally publishes DNS/DoT. For direct local testing you may also map:
+      # - "53:53/udp"
+      # - "53:53/tcp"
+      # - "853:853/tcp"
+      # - "853:853/udp"
     volumes:
-      - dns-dashboard-data:/data
+      - dns-data:/data
 
 volumes:
-  dns-dashboard-data:
+  dns-data:

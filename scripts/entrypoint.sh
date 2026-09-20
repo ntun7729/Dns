@@ -1,61 +1,50 @@
-#!/usr/bin/env sh
+#!/bin/sh
 set -eu
-umask 077
 
-decode_base64_env() {
-  source_name="$1"
-  target_name="$2"
-  eval "source_value=\${$source_name-}"
-  if [ -z "$source_value" ]; then
-    return
-  fi
-  if ! decoded_value=$(printf '%s' "$source_value" | tr -d '\r\n ' | base64 -d); then
-    echo "$source_name is not valid base64." >&2
+PORT="${PORT:-10000}"
+TECHNITIUM_CONFIG_DIR="${TECHNITIUM_CONFIG_DIR:-/data/technitium}"
+DNS_BRIDGE_DATA_DIR="${DNS_BRIDGE_DATA_DIR:-/data/bridge}"
+
+mkdir -p "$TECHNITIUM_CONFIG_DIR" "$DNS_BRIDGE_DATA_DIR" /tmp/nginx-client /tmp/nginx-proxy
+chmod 700 "$DNS_BRIDGE_DATA_DIR" || true
+
+# These are infrastructure bindings, not operational DNS settings. Keeping the
+# Technitium console on loopback allows nginx to be the single Render/Railway
+# HTTP ingress while all DNS behavior remains dashboard-managed by Technitium.
+export DNS_SERVER_WEB_SERVICE_LOCAL_ADDRESSES="127.0.0.1"
+export DNS_SERVER_WEB_SERVICE_HTTP_PORT="5380"
+export DNS_SERVER_WEB_SERVICE_ENABLE_HTTPS="false"
+
+sed "s/__PORT__/${PORT}/g" /opt/dns-bridge/nginx.conf.template > /tmp/nginx.conf
+
+/usr/bin/dotnet /opt/technitium/dns/DnsServerApp.dll "$TECHNITIUM_CONFIG_DIR" &
+TECH_PID=$!
+python3 /opt/dns-bridge/manager.py --data-dir "$DNS_BRIDGE_DATA_DIR" &
+BRIDGE_PID=$!
+nginx -c /tmp/nginx.conf -g 'daemon off;' &
+NGINX_PID=$!
+
+shutdown() {
+  trap - TERM INT EXIT
+  kill -TERM "$NGINX_PID" "$BRIDGE_PID" "$TECH_PID" 2>/dev/null || true
+  wait "$NGINX_PID" "$BRIDGE_PID" "$TECH_PID" 2>/dev/null || true
+}
+trap shutdown TERM INT EXIT
+
+# If any core process exits, fail the container instead of leaving a partially
+# working DNS deployment alive.
+while :; do
+  if ! kill -0 "$TECH_PID" 2>/dev/null; then
+    echo "Technitium DNS Server exited." >&2
     exit 1
   fi
-  export "$target_name=$decoded_value"
-}
-
-normalize_pem_env() {
-  variable_name="$1"
-  eval "variable_value=\${$variable_name-}"
-  if [ -n "$variable_value" ]; then
-    variable_value=$(printf '%b' "$variable_value")
-    export "$variable_name=$variable_value"
+  if ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
+    echo "DNS Bridge manager exited." >&2
+    exit 1
   fi
-}
-
-resolve_data_dir() {
-  if [ -n "${DNS_DASHBOARD_DATA_DIR:-}" ]; then
-    printf '%s\n' "$DNS_DASHBOARD_DATA_DIR"
-    return
+  if ! kill -0 "$NGINX_PID" 2>/dev/null; then
+    echo "nginx exited." >&2
+    exit 1
   fi
-  if [ -n "${RAILWAY_VOLUME_MOUNT_PATH:-}" ]; then
-    printf '%s/dns-dashboard\n' "${RAILWAY_VOLUME_MOUNT_PATH%/}"
-    return
-  fi
-  printf '%s\n' '/data/dns-dashboard'
-}
-
-DATA_DIR=$(resolve_data_dir)
-export DNS_DASHBOARD_DATA_DIR="$DATA_DIR"
-
-# Container volumes are commonly mounted as root-owned directories. Start the
-# entrypoint as root, prepare only our application directory, then drop privileges
-# before launching Python. This works for plain Docker and providers such as
-# Railway without requiring a provider-specific runtime UID override.
-if [ "$(id -u)" = "0" ]; then
-  mkdir -p "$DATA_DIR"
-  chown app:app "$DATA_DIR"
-fi
-
-decode_base64_env DOT_CERT_B64 DOT_CERT_PEM
-decode_base64_env DOT_KEY_B64 DOT_KEY_PEM
-normalize_pem_env DOT_CERT_PEM
-normalize_pem_env DOT_KEY_PEM
-
-if [ "$(id -u)" = "0" ]; then
-  exec gosu app python /app/app/application.py
-fi
-
-exec python /app/app/application.py
+  sleep 2
+done

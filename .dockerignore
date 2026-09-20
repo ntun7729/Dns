@@ -1,12 +1,7 @@
 .git
 .github
-.env
 __pycache__
 *.pyc
-.pytest_cache
 tests
-output
-memory
-*.pem
-*.key
-*.crt
+README.md
+docs
