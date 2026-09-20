@@ -141,7 +141,11 @@ def _toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=True)
 
 
-def validate_frp(payload: Mapping[str, Any], current: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def validate_frp(
+    payload: Mapping[str, Any],
+    current: Mapping[str, Any] | None = None,
+    require_server_addr: bool = True,
+) -> dict[str, Any]:
     base = json.loads(json.dumps(current if current is not None else DEFAULT_CONFIG))
     result = {
         "enabled": _bool(payload.get("enabled", base["enabled"]), "enabled"),
@@ -171,7 +175,7 @@ def validate_frp(payload: Mapping[str, Any], current: Mapping[str, Any] | None =
             "remote_port": _port(supplied.get("remote_port", existing.get("remote_port", default_proxy["remote_port"])), f"{name}.remote_port"),
         }
 
-    if result["enabled"] and not result["server_addr"]:
+    if require_server_addr and result["enabled"] and not result["server_addr"]:
         raise ValueError("FRPS address is required when FRP is enabled.")
     return result
 
@@ -305,7 +309,7 @@ class ConfigStore:
                 if obsolete in proxies:
                     proxies.pop(obsolete, None)
                     changed = True
-        normalized_frp = validate_frp(frp)
+        normalized_frp = validate_frp(frp, require_server_addr=False)
         if normalized_frp != frp:
             raw["frp"] = normalized_frp
             frp = normalized_frp
@@ -365,7 +369,7 @@ class ConfigStore:
         cleaned = sanitize_frpc_toml(text)
         with self.lock:
             doc = self._read()
-            frp = validate_frp(doc.get("frp", DEFAULT_CONFIG))
+            frp = validate_frp(doc.get("frp", DEFAULT_CONFIG), require_server_addr=False)
             frp["enabled"] = bool(enabled)
             doc["frp"] = frp
             doc["frpc_toml"] = cleaned
@@ -413,7 +417,7 @@ class ConfigStore:
             candidate = backup.get("config")
             if not isinstance(candidate, Mapping) or candidate.get("format") != CONFIG_FORMAT:
                 raise ValueError("Bridge backup is incomplete.")
-            frp = validate_frp(candidate.get("frp", {}))
+            frp = validate_frp(candidate.get("frp", {}), require_server_addr=False)
             admin = candidate.get("admin", {})
             if not isinstance(admin, Mapping):
                 admin = {}
