@@ -1,4 +1,5 @@
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -110,6 +111,41 @@ class BridgeTests(unittest.TestCase):
             self.assertNotIn("auth_token", frp)
             self.assertEqual(frp["proxies"]["dot"]["remote_port"], 8853)
             self.assertNotIn("localPort = 53", store.get_frpc_toml())
+
+    def test_manual_pem_import_creates_valid_blank_password_pfx(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            cert_file = root_path / "test.crt"
+            key_file = root_path / "test.key"
+            subprocess.run(
+                [
+                    "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                    "-keyout", str(key_file), "-out", str(cert_file),
+                    "-subj", "/CN=dns.example.com", "-days", "1",
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            certs = CertificateManager(root_path / "bridge", root_path / "technitium")
+            certs.import_manual(
+                cert_file.read_text(encoding="utf-8"),
+                key_file.read_text(encoding="utf-8"),
+            )
+            status = certs.status()
+            self.assertTrue(status["certificate_exists"])
+            self.assertEqual(status["pfx_password"], "")
+            subprocess.run(
+                [
+                    "openssl", "pkcs12", "-in", status["pfx_path"],
+                    "-passin", "pass:", "-noout",
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
 
     def test_cloudflare_token_is_not_exported(self):
         with tempfile.TemporaryDirectory() as root:
