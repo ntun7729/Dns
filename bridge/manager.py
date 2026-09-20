@@ -1242,7 +1242,9 @@ class CertificateManager:
         return True
 
     def _auto_loop(self) -> None:
-        if self.stop_event.wait(60):
+        # Run the first certificate check shortly after container startup so
+        # older persisted EC/X2 certificates are migrated automatically.
+        if self.stop_event.wait(10):
             return
         while not self.stop_event.is_set():
             try:
