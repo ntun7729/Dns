@@ -28,6 +28,19 @@ PASSWORD_MAX_LENGTH = 256
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 MAX_BODY_BYTES = 2 * 1024 * 1024
+MAX_TOML_BYTES = 128 * 1024
+CERT_CONFIG_FORMAT = "dns-bridge-certificate-v1"
+EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+DEFAULT_CERT_CONFIG = {
+    "format": CERT_CONFIG_FORMAT,
+    "mode": "manual",
+    "domain": "",
+    "email": "",
+    "auto_renew": False,
+    "accept_tos": False,
+    "updated_at": None,
+}
 
 DEFAULT_CONFIG = {
     "enabled": False,
@@ -37,8 +50,6 @@ DEFAULT_CONFIG = {
     "proxies": {
         "dot": {"enabled": True, "type": "tcp", "local_port": 853, "remote_port": 853},
         "doq": {"enabled": False, "type": "udp", "local_port": 853, "remote_port": 853},
-        "dns_tcp": {"enabled": False, "type": "tcp", "local_port": 53, "remote_port": 53},
-        "dns_udp": {"enabled": False, "type": "udp", "local_port": 53, "remote_port": 53},
     },
 }
 
@@ -189,6 +200,17 @@ def render_frpc_toml(frp: Mapping[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def sanitize_frpc_toml(value: Any) -> str:
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    if "\x00" in text:
+        raise ValueError("frpc.toml cannot contain NUL bytes.")
+    if len(text.encode("utf-8")) > MAX_TOML_BYTES:
+        raise ValueError("frpc.toml is too large.")
+    if re.search(r"(?mi)^\s*auth\.(?:token|method)\s*=", text):
+        raise ValueError("FRP token authentication is disabled for this deployment.")
+    return text.rstrip() + "\n" if text.strip() else ""
+
+
 def _safe_write(path: Path, content: str, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -217,6 +239,7 @@ class ConfigStore:
                 "updated_at": now_iso(),
                 "admin": {"username": "", "password_hash": ""},
                 "frp": json.loads(json.dumps(DEFAULT_CONFIG)),
+                "frpc_toml": render_frpc_toml(DEFAULT_CONFIG),
                 "migration": None,
             }
         self._write(migrated)
@@ -257,6 +280,7 @@ class ConfigStore:
                 "updated_at": now_iso(),
                 "admin": {"username": old_user, "password_hash": old_hash},
                 "frp": frp,
+                "frpc_toml": render_frpc_toml(frp),
                 "migration": {"source": str(path), "migrated_at": now_iso()},
             }
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
@@ -266,11 +290,36 @@ class ConfigStore:
         raw = json.loads(self.path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict) or raw.get("format") != CONFIG_FORMAT:
             raise ValueError("Unsupported bridge configuration format.")
+        changed = False
         frp = raw.get("frp")
-        if isinstance(frp, dict) and "auth_token" in frp:
-            # Older bridge versions could persist FRP token authentication.
-            # This version does not support it; erase it on first read.
+        if not isinstance(frp, dict):
+            frp = json.loads(json.dumps(DEFAULT_CONFIG))
+            raw["frp"] = frp
+            changed = True
+        if "auth_token" in frp:
             frp.pop("auth_token", None)
+            changed = True
+        proxies = frp.get("proxies")
+        if isinstance(proxies, dict):
+            for obsolete in ("dns_tcp", "dns_udp"):
+                if obsolete in proxies:
+                    proxies.pop(obsolete, None)
+                    changed = True
+        normalized_frp = validate_frp(frp)
+        if normalized_frp != frp:
+            raw["frp"] = normalized_frp
+            frp = normalized_frp
+            changed = True
+        raw_toml = raw.get("frpc_toml")
+        if not isinstance(raw_toml, str):
+            raw["frpc_toml"] = render_frpc_toml(frp)
+            changed = True
+        else:
+            cleaned = sanitize_frpc_toml(raw_toml)
+            if cleaned != raw_toml:
+                raw["frpc_toml"] = cleaned
+                changed = True
+        if changed:
             raw["updated_at"] = now_iso()
             _safe_write(self.path, json.dumps(raw, indent=2, sort_keys=True) + "\n")
         return raw
@@ -307,6 +356,23 @@ class ConfigStore:
         with self.lock:
             return json.loads(json.dumps(self._read().get("frp", DEFAULT_CONFIG)))
 
+    def get_frpc_toml(self) -> str:
+        with self.lock:
+            doc = self._read()
+            return sanitize_frpc_toml(doc.get("frpc_toml", render_frpc_toml(doc.get("frp", DEFAULT_CONFIG))))
+
+    def save_frpc_toml(self, text: str, enabled: bool) -> dict[str, Any]:
+        cleaned = sanitize_frpc_toml(text)
+        with self.lock:
+            doc = self._read()
+            frp = validate_frp(doc.get("frp", DEFAULT_CONFIG))
+            frp["enabled"] = bool(enabled)
+            doc["frp"] = frp
+            doc["frpc_toml"] = cleaned
+            doc["updated_at"] = now_iso()
+            self._write(doc)
+        return self.public_config()
+
     def public_config(self) -> dict[str, Any]:
         with self.lock:
             doc = self._read()
@@ -316,6 +382,7 @@ class ConfigStore:
             "setup_required": not bool(doc.get("admin", {}).get("username")),
             "username": str(doc.get("admin", {}).get("username", "")),
             "frp": frp,
+            "frpc_toml": sanitize_frpc_toml(doc.get("frpc_toml", render_frpc_toml(frp))),
             "migration": doc.get("migration"),
             "updated_at": doc.get("updated_at"),
         }
@@ -325,6 +392,7 @@ class ConfigStore:
             doc = self._read()
             frp = validate_frp(payload, doc.get("frp", DEFAULT_CONFIG))
             doc["frp"] = frp
+            doc["frpc_toml"] = render_frpc_toml(frp)
             doc["updated_at"] = now_iso()
             self._write(doc)
         return self.public_config()
@@ -358,6 +426,7 @@ class ConfigStore:
                 "updated_at": now_iso(),
                 "admin": {"username": username, "password_hash": password_hash},
                 "frp": frp,
+                "frpc_toml": sanitize_frpc_toml(candidate.get("frpc_toml", render_frpc_toml(frp))),
                 "migration": candidate.get("migration"),
             }
         elif fmt == LEGACY_BACKUP_FORMAT:
@@ -384,6 +453,7 @@ class ConfigStore:
             )
             doc = current
             doc["frp"] = frp
+            doc["frpc_toml"] = render_frpc_toml(frp)
             doc["updated_at"] = now_iso()
             doc["migration"] = {"source": "legacy-backup", "migrated_at": now_iso()}
         else:
@@ -444,19 +514,52 @@ class FrpcSupervisor:
                 with self.lock:
                     self.logs.append(clean[-1000:])
 
-    def _write_config(self, frp: Mapping[str, Any]) -> None:
-        _safe_write(self.store.frpc_path, render_frpc_toml(frp))
+    def _write_config(self, text: str) -> None:
+        _safe_write(self.store.frpc_path, sanitize_frpc_toml(text))
 
-    def _config_hash(self, frp: Mapping[str, Any]) -> str:
-        return hashlib.sha256(json.dumps(frp, sort_keys=True).encode()).hexdigest()
+    def _config_hash(self, text: str) -> str:
+        return hashlib.sha256(text.encode()).hexdigest()
+
+    def verify_toml(self, text: str) -> str:
+        cleaned = sanitize_frpc_toml(text)
+        if not cleaned:
+            raise ValueError("frpc.toml cannot be empty.")
+        verify_path = self.store.root / "frpc.verify.toml"
+        _safe_write(verify_path, cleaned)
+        try:
+            completed = subprocess.run(
+                [self.frpc_binary, "verify", "-c", str(verify_path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=15,
+                env={
+                    "PATH": "/usr/local/bin:/usr/bin:/bin",
+                    "HOME": "/tmp",
+                    "TMPDIR": "/tmp",
+                    "SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt",
+                },
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ValueError(f"Unable to verify frpc.toml: {exc}") from exc
+        finally:
+            try:
+                verify_path.unlink()
+            except OSError:
+                pass
+        output = (completed.stdout or "").strip()
+        if completed.returncode != 0:
+            raise ValueError("frpc.toml validation failed: " + (output[-4000:] or "unknown error"))
+        return cleaned
 
     def _run(self) -> None:
         backoff = 1.0
         while not self.stop_event.is_set():
             try:
                 frp = self.store.get_frp()
-                desired = bool(frp.get("enabled") and frp.get("server_addr"))
-                config_hash = self._config_hash(frp)
+                config_text = self.store.get_frpc_toml()
+                desired = bool(frp.get("enabled") and config_text.strip())
+                config_hash = self._config_hash(config_text)
                 with self.lock:
                     proc = self.process
                 running = bool(proc and proc.poll() is None)
@@ -480,7 +583,7 @@ class FrpcSupervisor:
                 if running:
                     self._stop_process()
 
-                self._write_config(frp)
+                self._write_config(config_text)
                 proc = subprocess.Popen(
                     [self.frpc_binary, "-c", str(self.store.frpc_path)],
                     stdout=subprocess.PIPE,
@@ -552,17 +655,13 @@ class FrpcSupervisor:
             exit_code = self.last_exit_code
             started_at = self.started_at
             restarts = self.restart_count
-        probes: dict[str, bool | None] = {}
-        for name, proxy in frp.get("proxies", {}).items():
-            if not proxy.get("enabled"):
-                probes[name] = None
-            elif proxy.get("type") == "tcp":
-                probes[name] = self._tcp_probe(int(proxy["local_port"]))
-            else:
-                probes[name] = None
+        probes: dict[str, bool | None] = {
+            "dot_853": self._tcp_probe(853),
+            "doq_853": None,
+        }
         return {
             "enabled": bool(frp.get("enabled")),
-            "configured": bool(frp.get("server_addr")),
+            "configured": bool(self.store.get_frpc_toml().strip()),
             "running": running,
             "pid": pid,
             "started_at": started_at,
@@ -574,6 +673,370 @@ class FrpcSupervisor:
         }
 
 
+
+class CertificateManager:
+    def __init__(
+        self,
+        bridge_root: Path,
+        technitium_config_dir: Path,
+        lego_binary: str = "/usr/local/bin/lego",
+        openssl_binary: str = "/usr/bin/openssl",
+    ) -> None:
+        self.bridge_root = bridge_root
+        self.technitium_config_dir = technitium_config_dir
+        self.lego_binary = lego_binary
+        self.openssl_binary = openssl_binary
+        self.config_path = bridge_root / "certificate.json"
+        self.token_path = bridge_root / "cloudflare-dns-api-token"
+        self.acme_dir = bridge_root / "acme"
+        self.cert_dir = technitium_config_dir / "certificates"
+        self.cert_pem_path = self.cert_dir / "dns-tls.crt.pem"
+        self.key_pem_path = self.cert_dir / "dns-tls.key.pem"
+        self.pfx_path = self.cert_dir / "dns-tls.pfx"
+        self.lock = threading.RLock()
+        self.running = False
+        self.last_error: str | None = None
+        self.last_output = ""
+        self.last_attempt: str | None = None
+        self.last_success: str | None = None
+        self.stop_event = threading.Event()
+        self.auto_thread: threading.Thread | None = None
+        self._ensure_dirs()
+        if not self.config_path.exists():
+            self._write_config(DEFAULT_CERT_CONFIG)
+
+    def _ensure_dirs(self) -> None:
+        for path in (self.bridge_root, self.acme_dir, self.cert_dir):
+            path.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.bridge_root, 0o700)
+        os.chmod(self.acme_dir, 0o700)
+        os.chmod(self.cert_dir, 0o700)
+
+    def _read_config(self) -> dict[str, Any]:
+        try:
+            raw = json.loads(self.config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raw = {}
+        cfg = json.loads(json.dumps(DEFAULT_CERT_CONFIG))
+        if isinstance(raw, Mapping):
+            cfg.update({k: raw.get(k, cfg[k]) for k in cfg})
+        cfg["format"] = CERT_CONFIG_FORMAT
+        cfg["mode"] = "cloudflare" if cfg.get("mode") == "cloudflare" else "manual"
+        cfg["domain"] = str(cfg.get("domain") or "").strip().lower().rstrip(".")
+        cfg["email"] = str(cfg.get("email") or "").strip()
+        cfg["auto_renew"] = bool(cfg.get("auto_renew"))
+        cfg["accept_tos"] = bool(cfg.get("accept_tos"))
+        return cfg
+
+    def _write_config(self, cfg: Mapping[str, Any]) -> None:
+        document = json.loads(json.dumps(DEFAULT_CERT_CONFIG))
+        document.update({k: cfg.get(k, document[k]) for k in document})
+        document["format"] = CERT_CONFIG_FORMAT
+        document["updated_at"] = now_iso()
+        _safe_write(self.config_path, json.dumps(document, indent=2, sort_keys=True) + "\n")
+
+    @staticmethod
+    def _validate_domain(value: Any) -> str:
+        domain = str(value or "").strip().lower().rstrip(".")
+        if not domain or len(domain) > 253 or not HOST_RE.fullmatch(domain) or ".." in domain:
+            raise ValueError("Certificate domain must be a valid hostname.")
+        try:
+            socket.inet_pton(socket.AF_INET, domain)
+            raise ValueError("Certificate domain must be a hostname, not an IP address.")
+        except OSError:
+            pass
+        try:
+            socket.inet_pton(socket.AF_INET6, domain)
+            raise ValueError("Certificate domain must be a hostname, not an IP address.")
+        except OSError:
+            pass
+        if "." not in domain:
+            raise ValueError("Certificate domain must be a fully qualified hostname.")
+        return domain
+
+    @staticmethod
+    def _validate_email(value: Any) -> str:
+        email = str(value or "").strip()
+        if not EMAIL_RE.fullmatch(email) or len(email) > 254:
+            raise ValueError("A valid ACME email address is required.")
+        return email
+
+    def export_config(self) -> dict[str, Any]:
+        with self.lock:
+            cfg = self._read_config()
+        cfg.pop("updated_at", None)
+        return cfg
+
+    def import_config(self, cfg: Any) -> None:
+        if not isinstance(cfg, Mapping):
+            return
+        mode = "cloudflare" if cfg.get("mode") == "cloudflare" else "manual"
+        document = json.loads(json.dumps(DEFAULT_CERT_CONFIG))
+        document["mode"] = mode
+        if mode == "cloudflare":
+            domain = str(cfg.get("domain") or "").strip()
+            email = str(cfg.get("email") or "").strip()
+            if domain:
+                document["domain"] = self._validate_domain(domain)
+            if email:
+                document["email"] = self._validate_email(email)
+            document["auto_renew"] = bool(cfg.get("auto_renew"))
+            document["accept_tos"] = bool(cfg.get("accept_tos"))
+        self._write_config(document)
+
+    def save_cloudflare(self, payload: Mapping[str, Any]) -> None:
+        domain = self._validate_domain(payload.get("domain"))
+        email = self._validate_email(payload.get("email"))
+        api_token = str(payload.get("api_token") or "")
+        if len(api_token) > 4096:
+            raise ValueError("Cloudflare API token is too long.")
+        clear_token = _bool(payload.get("clear_token", False), "clear_token")
+        cfg = {
+            "format": CERT_CONFIG_FORMAT,
+            "mode": "cloudflare",
+            "domain": domain,
+            "email": email,
+            "auto_renew": _bool(payload.get("auto_renew", True), "auto_renew"),
+            "accept_tos": _bool(payload.get("accept_tos", False), "accept_tos"),
+        }
+        with self.lock:
+            self._write_config(cfg)
+            if api_token:
+                _safe_write(self.token_path, api_token.strip() + "\n")
+            elif clear_token:
+                try:
+                    self.token_path.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def _openssl(self, args: list[str], timeout: int = 20) -> subprocess.CompletedProcess[str]:
+        try:
+            completed = subprocess.run(
+                [self.openssl_binary, *args],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout,
+                env={"PATH": "/usr/bin:/bin", "HOME": "/tmp", "TMPDIR": "/tmp"},
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ValueError(f"OpenSSL failed: {exc}") from exc
+        if completed.returncode != 0:
+            raise ValueError("OpenSSL failed: " + (completed.stdout or "unknown error")[-4000:])
+        return completed
+
+    def _install_pem(self, certificate_pem: str, private_key_pem: str) -> None:
+        if "-----BEGIN CERTIFICATE-----" not in certificate_pem:
+            raise ValueError("Certificate file is not PEM encoded.")
+        if "-----BEGIN " not in private_key_pem or "PRIVATE KEY-----" not in private_key_pem:
+            raise ValueError("Private key file is not PEM encoded.")
+        temp_cert = self.cert_dir / ".dns-tls.crt.tmp"
+        temp_key = self.cert_dir / ".dns-tls.key.tmp"
+        temp_pfx = self.cert_dir / ".dns-tls.pfx.tmp"
+        _safe_write(temp_cert, certificate_pem.rstrip() + "\n")
+        _safe_write(temp_key, private_key_pem.rstrip() + "\n")
+        try:
+            cert_pub = self._openssl(["x509", "-in", str(temp_cert), "-pubkey", "-noout"]).stdout
+            key_pub = self._openssl(["pkey", "-in", str(temp_key), "-pubout"]).stdout
+            if hashlib.sha256(cert_pub.encode()).digest() != hashlib.sha256(key_pub.encode()).digest():
+                raise ValueError("Certificate and private key do not match.")
+            self._openssl([
+                "pkcs12", "-export",
+                "-out", str(temp_pfx),
+                "-inkey", str(temp_key),
+                "-in", str(temp_cert),
+                "-passout", "pass:",
+            ])
+            os.chmod(temp_pfx, 0o600)
+            os.replace(temp_cert, self.cert_pem_path)
+            os.replace(temp_key, self.key_pem_path)
+            os.replace(temp_pfx, self.pfx_path)
+            os.chmod(self.cert_pem_path, 0o600)
+            os.chmod(self.key_pem_path, 0o600)
+            os.chmod(self.pfx_path, 0o600)
+        finally:
+            for path in (temp_cert, temp_key, temp_pfx):
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def import_manual(self, certificate_pem: str, private_key_pem: str) -> None:
+        with self.lock:
+            self._install_pem(certificate_pem, private_key_pem)
+            cfg = json.loads(json.dumps(DEFAULT_CERT_CONFIG))
+            cfg["mode"] = "manual"
+            cfg["auto_renew"] = False
+            self._write_config(cfg)
+            self.last_error = None
+            self.last_success = now_iso()
+            self.last_output = "Manual certificate imported and converted to PKCS#12."
+
+    def _expiry(self) -> str | None:
+        if not self.cert_pem_path.is_file():
+            return None
+        try:
+            output = self._openssl(["x509", "-in", str(self.cert_pem_path), "-noout", "-enddate"]).stdout.strip()
+            return output.split("=", 1)[1] if "=" in output else output
+        except ValueError:
+            return None
+
+    def _expires_within(self, days: int) -> bool:
+        if not self.cert_pem_path.is_file():
+            return True
+        try:
+            completed = subprocess.run(
+                [self.openssl_binary, "x509", "-in", str(self.cert_pem_path), "-noout", "-checkend", str(days * 86400)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+            return completed.returncode != 0
+        except (OSError, subprocess.TimeoutExpired):
+            return True
+
+    def _find_lego_certificates(self, domain: str) -> tuple[Path, Path, Path | None]:
+        base = self.acme_dir / "certificates"
+        cert = base / f"{domain}.crt"
+        key = base / f"{domain}.key"
+        issuer = base / f"{domain}.issuer.crt"
+        if not cert.is_file() or not key.is_file():
+            raise ValueError("ACME client completed but certificate files were not found.")
+        return cert, key, issuer if issuer.is_file() else None
+
+    def _run_cloudflare(self) -> None:
+        with self.lock:
+            cfg = self._read_config()
+        if cfg.get("mode") != "cloudflare":
+            raise ValueError("Cloudflare ACME mode is not configured.")
+        domain = self._validate_domain(cfg.get("domain"))
+        email = self._validate_email(cfg.get("email"))
+        if not self.token_path.is_file():
+            raise ValueError("Cloudflare API token is not configured.")
+        token = self.token_path.read_text(encoding="utf-8").strip()
+        if not token:
+            raise ValueError("Cloudflare API token is empty.")
+        lego_cert_path = self.acme_dir / "certificates" / f"{domain}.crt"
+        first_issue = not lego_cert_path.is_file()
+        if first_issue and not cfg.get("accept_tos"):
+            raise ValueError("Accept the ACME/Let's Encrypt terms before requesting the first certificate.")
+        if not first_issue and not self._expires_within(30):
+            self.last_output = "Certificate is valid for more than 30 days; renewal is not due."
+            return
+
+        command = [
+            self.lego_binary,
+            "run" if first_issue else "renew",
+            "--email", email,
+            "--dns", "cloudflare",
+            "--domains", domain,
+            "--path", str(self.acme_dir),
+        ]
+        if first_issue:
+            command.append("--accept-tos")
+        else:
+            command.extend(["--days", "30"])
+
+        env = {
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "HOME": str(self.bridge_root),
+            "TMPDIR": "/tmp",
+            "SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt",
+            "CLOUDFLARE_DNS_API_TOKEN": token,
+        }
+        try:
+            completed = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=600,
+                env=env,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ValueError(f"ACME client failed: {exc}") from exc
+        output = (completed.stdout or "").strip()
+        self.last_output = output[-12000:]
+        if completed.returncode != 0:
+            raise ValueError("ACME client failed: " + (output[-4000:] or "unknown error"))
+
+        cert, key, issuer = self._find_lego_certificates(domain)
+        certificate_pem = cert.read_text(encoding="utf-8")
+        if issuer is not None:
+            certificate_pem = certificate_pem.rstrip() + "\n" + issuer.read_text(encoding="utf-8").lstrip()
+        private_key_pem = key.read_text(encoding="utf-8")
+        self._install_pem(certificate_pem, private_key_pem)
+
+    def _worker(self) -> None:
+        try:
+            with self.lock:
+                self.last_attempt = now_iso()
+                self.last_error = None
+            self._run_cloudflare()
+            with self.lock:
+                self.last_success = now_iso()
+        except ValueError as exc:
+            with self.lock:
+                self.last_error = str(exc)
+        finally:
+            with self.lock:
+                self.running = False
+
+    def request_renew(self) -> bool:
+        with self.lock:
+            if self.running:
+                return False
+            self.running = True
+        threading.Thread(target=self._worker, name="certificate-renew", daemon=True).start()
+        return True
+
+    def _auto_loop(self) -> None:
+        if self.stop_event.wait(60):
+            return
+        while not self.stop_event.is_set():
+            try:
+                with self.lock:
+                    cfg = self._read_config()
+                    should_check = cfg.get("mode") == "cloudflare" and bool(cfg.get("auto_renew")) and self.token_path.is_file()
+                if should_check and self._expires_within(30):
+                    self.request_renew()
+            except Exception as exc:
+                with self.lock:
+                    self.last_error = f"Auto-renew check failed: {exc}"
+            if self.stop_event.wait(6 * 3600):
+                break
+
+    def start(self) -> None:
+        self.auto_thread = threading.Thread(target=self._auto_loop, name="certificate-auto-renew", daemon=True)
+        self.auto_thread.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.auto_thread and self.auto_thread.is_alive():
+            self.auto_thread.join(timeout=5)
+
+    def status(self) -> dict[str, Any]:
+        with self.lock:
+            cfg = self._read_config()
+            return {
+                "mode": cfg.get("mode"),
+                "domain": cfg.get("domain"),
+                "email": cfg.get("email"),
+                "auto_renew": bool(cfg.get("auto_renew")),
+                "accept_tos": bool(cfg.get("accept_tos")),
+                "cloudflare_token_configured": self.token_path.is_file() and self.token_path.stat().st_size > 0,
+                "pfx_path": str(self.pfx_path),
+                "pfx_password": "",
+                "certificate_exists": self.pfx_path.is_file(),
+                "expires": self._expiry(),
+                "running": self.running,
+                "last_attempt": self.last_attempt,
+                "last_success": self.last_success,
+                "last_error": self.last_error,
+                "last_output": self.last_output,
+            }
+
+
 class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -581,9 +1044,10 @@ class Server(ThreadingHTTPServer):
 
 
 class BridgeApp:
-    def __init__(self, store: ConfigStore, supervisor: FrpcSupervisor, index_file: Path) -> None:
+    def __init__(self, store: ConfigStore, supervisor: FrpcSupervisor, certificates: CertificateManager, index_file: Path) -> None:
         self.store = store
         self.supervisor = supervisor
+        self.certificates = certificates
         self.index_file = index_file
 
     @staticmethod
@@ -712,9 +1176,11 @@ class BridgeApp:
                 if not self._require_auth():
                     return
                 if path == "/_bridge/api/status":
-                    self._json({"ok": True, "config": app.store.public_config(), "frpc": app.supervisor.status(), "technitium_ready": app.technitium_ready()})
+                    self._json({"ok": True, "config": app.store.public_config(), "frpc": app.supervisor.status(), "certificate": app.certificates.status(), "technitium_ready": app.technitium_ready()})
                 elif path == "/_bridge/api/backup":
-                    payload = json.dumps(app.store.export_backup(), indent=2).encode()
+                    backup = app.store.export_backup()
+                    backup["certificate"] = app.certificates.export_config()
+                    payload = json.dumps(backup, indent=2).encode()
                     self.send_response(HTTPStatus.OK)
                     self.send_header("Content-Type", "application/json; charset=utf-8")
                     self.send_header("Content-Disposition", f'attachment; filename="dns-bridge-{datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")}.json"')
@@ -752,6 +1218,7 @@ class BridgeApp:
                         if not isinstance(backup, Mapping):
                             raise ValueError("Backup object is missing.")
                         app.store.import_backup(backup)
+                        app.certificates.import_config(backup.get("certificate"))
                         app.supervisor.reload()
                     except ValueError as exc:
                         self._json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
@@ -765,7 +1232,26 @@ class BridgeApp:
                 if data is None:
                     return
                 try:
-                    if path == "/_bridge/api/settings":
+                    if path == "/_bridge/api/frpc-toml":
+                        enabled = _bool(data.get("enabled", False), "enabled")
+                        text = sanitize_frpc_toml(data.get("toml", ""))
+                        if enabled:
+                            text = app.supervisor.verify_toml(text)
+                        config = app.store.save_frpc_toml(text, enabled)
+                        app.supervisor.reload()
+                        self._json({"ok": True, "config": config})
+                    elif path == "/_bridge/api/certificate/import":
+                        certificate_pem = str(data.get("certificate_pem") or "")
+                        private_key_pem = str(data.get("private_key_pem") or "")
+                        app.certificates.import_manual(certificate_pem, private_key_pem)
+                        self._json({"ok": True, "certificate": app.certificates.status()})
+                    elif path == "/_bridge/api/certificate/cloudflare":
+                        app.certificates.save_cloudflare(data)
+                        self._json({"ok": True, "certificate": app.certificates.status()})
+                    elif path == "/_bridge/api/certificate/renew":
+                        started = app.certificates.request_renew()
+                        self._json({"ok": True, "started": started, "certificate": app.certificates.status()})
+                    elif path == "/_bridge/api/settings":
                         config = app.store.save_frp(data)
                         app.supervisor.reload()
                         self._json({"ok": True, "config": config})
@@ -777,6 +1263,7 @@ class BridgeApp:
                         if not isinstance(backup, Mapping):
                             raise ValueError("Backup object is missing.")
                         app.store.import_backup(backup)
+                        app.certificates.import_config(backup.get("certificate"))
                         app.supervisor.reload()
                         self._json({"ok": True, "message": "Backup restored."})
                     else:
@@ -794,6 +1281,7 @@ def main() -> int:
     parser.add_argument("--data-dir", default=os.environ.get("DNS_BRIDGE_DATA_DIR", "/data/bridge"))
     parser.add_argument("--legacy-dir", default="/data/dns-dashboard")
     parser.add_argument("--index-file", default="/opt/dns-bridge/index.html")
+    parser.add_argument("--technitium-config-dir", default=os.environ.get("TECHNITIUM_CONFIG_DIR", "/data/technitium"))
     args = parser.parse_args()
 
     root = Path(args.data_dir)
@@ -808,8 +1296,10 @@ def main() -> int:
 
     store = ConfigStore(root, Path(args.legacy_dir))
     supervisor = FrpcSupervisor(store)
+    certificates = CertificateManager(root, Path(args.technitium_config_dir))
     supervisor.start()
-    app = BridgeApp(store, supervisor, Path(args.index_file))
+    certificates.start()
+    app = BridgeApp(store, supervisor, certificates, Path(args.index_file))
     server = Server((args.bind, args.port), app.handler())
 
     stopping = threading.Event()
@@ -827,6 +1317,7 @@ def main() -> int:
     finally:
         server.server_close()
         supervisor.stop()
+        certificates.stop()
     return 0
 
 
