@@ -12,6 +12,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Railway bridge public health
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -fsS --max-time 15 https://dns-production-eebd.up.railway.app/_bridge/api/public | python3 -m json.tool
+
       - name: Public DNS resolution
         shell: bash
         run: |
