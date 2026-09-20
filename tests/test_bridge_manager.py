@@ -147,6 +147,33 @@ class BridgeTests(unittest.TestCase):
                 text=True,
             )
 
+    def test_lego_v5_run_command_places_flags_after_subcommand(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            certs = CertificateManager(root_path / "bridge", root_path / "technitium", lego_binary="/usr/local/bin/lego")
+            first = certs._build_lego_command("dns.example.com", "admin@example.com", True)
+            renew = certs._build_lego_command("dns.example.com", "admin@example.com", False)
+
+            self.assertEqual(first[:2], ["/usr/local/bin/lego", "run"])
+            self.assertGreater(first.index("--email"), first.index("run"))
+            self.assertGreater(first.index("--dns"), first.index("run"))
+            self.assertGreater(first.index("--domains"), first.index("run"))
+            self.assertIn("--accept-tos", first)
+            self.assertNotIn("renew", first)
+
+            self.assertEqual(renew[:2], ["/usr/local/bin/lego", "run"])
+            self.assertIn("--renew-days", renew)
+            self.assertIn("30", renew)
+            self.assertIn("--no-random-sleep", renew)
+            self.assertNotIn("renew", renew)
+
+    def test_bridge_ui_preserves_dirty_form_values_during_polling(self):
+        index = (Path(__file__).resolve().parents[1] / "bridge" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("frpDirty=false,certDirty=false,adminDirty=false", index)
+        self.assertIn("if(hydrateForm||!frpDirty)", index)
+        self.assertIn("if(hydrateForm||!certDirty)", index)
+        self.assertIn("refresh(false)", index)
+
     def test_cloudflare_token_is_not_exported(self):
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
