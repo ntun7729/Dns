@@ -1443,7 +1443,19 @@ class BridgeApp:
                     self._write(body)
                     return
                 if path == "/_bridge/api/public":
-                    self._json({"ok": True, "config": app.store.public_config(), "technitium_ready": app.technitium_ready()})
+                    cert_status = app.certificates.status()
+                    self._json({
+                        "ok": True,
+                        "config": app.store.public_config(),
+                        "technitium_ready": app.technitium_ready(),
+                        "public_health": {
+                            "dot_local_ready": app.supervisor._tcp_probe(853),
+                            "certificate_exists": bool(cert_status.get("certificate_exists")),
+                            "certificate_key_algorithm": cert_status.get("key_algorithm"),
+                            "android_legacy_compatible": bool(cert_status.get("android_legacy_compatible")),
+                            "certificate_last_error": cert_status.get("last_error"),
+                        },
+                    })
                     return
                 if not path.startswith("/_bridge/api/"):
                     self.send_error(HTTPStatus.NOT_FOUND)
