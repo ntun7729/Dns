@@ -54,7 +54,6 @@ The bridge page manages:
 
 - FRPC on/off
 - FRPS hostname/IP and control port
-- FRP token
 - TLS for the FRPC control connection
 - DoT TCP 853 publication
 - DoQ UDP 853 publication
@@ -62,14 +61,14 @@ The bridge page manages:
 - FRPC process status and recent logs
 - Bridge backup/restore
 
-The bridge has its own small administrator account. This avoids storing Technitium credentials or API tokens in the bridge process.
+The bridge has its own small administrator account. This avoids storing Technitium credentials or API tokens in the bridge process. FRP token authentication is intentionally not used.
 
 ## Backups
 
 There are now **two intentionally separate backups**:
 
 1. **Technitium backup** — use Technitium's Settings backup/restore. It can include DNS/web settings, zones, allowed/blocked zones, blocklists, apps, DHCP scopes, statistics and logs.
-2. **Bridge backup** — open `/_bridge/` and download the bridge backup. It contains FRP settings and the bridge administrator hash. It may contain the FRP token, so keep it private.
+2. **Bridge backup** — open `/_bridge/` and download the bridge backup. It contains FRP connection/proxy settings and the bridge administrator hash.
 
 This is safer than a custom DNS backup format because Technitium owns and restores its own state.
 
@@ -79,13 +78,13 @@ If `/data/dns-dashboard/config.json` from the old deployment is still present an
 
 - old bridge administrator username/password hash
 - FRP enabled state
-- FRPS address/control port/token
+- FRPS address/control port
 - old local DoT port
 - old FRP public DoT port
 
 It does **not** delete the legacy files.
 
-The bridge restore endpoint also accepts the old `dns-dashboard-backup-v1` JSON format and extracts the FRP settings from it.
+The bridge restore endpoint also accepts the old `dns-dashboard-backup-v1` JSON format and extracts only the non-token FRP settings. Any legacy FRP token is ignored and removed.
 
 Old resolver profiles/blocklists are not automatically translated into Technitium because the two DNS engines use different configuration models. Configure those once in the Technitium console, then use Technitium's native backup from that point forward.
 
