@@ -1057,11 +1057,20 @@ class BridgeApp:
 
     @staticmethod
     def technitium_ready() -> bool:
+        targets = ["127.0.0.1"]
         try:
-            with socket.create_connection(("127.0.0.1", 5380), timeout=0.5):
-                return True
+            resolved = socket.gethostbyname(socket.gethostname())
+            if resolved not in targets:
+                targets.append(resolved)
         except OSError:
-            return False
+            pass
+        for host in targets:
+            try:
+                with socket.create_connection((host, 5380), timeout=0.5):
+                    return True
+            except OSError:
+                continue
+        return False
 
     def handler(self) -> type[BaseHTTPRequestHandler]:
         app = self
