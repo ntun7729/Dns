@@ -20,7 +20,6 @@ class BridgeTests(unittest.TestCase):
                 "enabled": True,
                 "server_addr": "frp.example.com",
                 "server_port": 7000,
-                "auth_token": "secret",
                 "transport_tls": True,
                 "proxies": {
                     "dot": {"enabled": True, "local_port": 853, "remote_port": 853},
@@ -30,16 +29,14 @@ class BridgeTests(unittest.TestCase):
         )
         text = render_frpc_toml(cfg)
         self.assertIn('serverAddr = "frp.example.com"', text)
-        self.assertIn('auth.token = "secret"', text)
+        self.assertNotIn("auth.token", text)
         self.assertIn('name = "dns-bridge-dot"', text)
         self.assertIn('type = "udp"', text)
 
-    def test_token_is_preserved_when_blank(self):
-        current = validate_frp({"auth_token": "keepme"})
-        updated = validate_frp({"server_port": 7001, "auth_token": ""}, current)
-        self.assertEqual(updated["auth_token"], "keepme")
-        cleared = validate_frp({"clear_auth_token": True}, updated)
-        self.assertEqual(cleared["auth_token"], "")
+    def test_token_fields_are_ignored(self):
+        cfg = validate_frp({"auth_token": "must-not-be-used", "clear_auth_token": True})
+        self.assertNotIn("auth_token", cfg)
+        self.assertNotIn("auth.token", render_frpc_toml(cfg))
 
     def test_backup_round_trip(self):
         with tempfile.TemporaryDirectory() as root:
@@ -76,7 +73,7 @@ class BridgeTests(unittest.TestCase):
             frp = store.get_frp()
             self.assertTrue(frp["enabled"])
             self.assertEqual(frp["server_addr"], "frp.old.example")
-            self.assertEqual(frp["auth_token"], "old-token")
+            self.assertNotIn("auth_token", frp)
             self.assertEqual(frp["proxies"]["dot"]["remote_port"], 8853)
 
     def test_invalid_enabled_without_server(self):
