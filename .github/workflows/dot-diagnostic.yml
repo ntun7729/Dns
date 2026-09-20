@@ -1,4 +1,5 @@
 name: DoT diagnostic
+# diagnostic-generation: 2
 
 on:
   workflow_dispatch:
