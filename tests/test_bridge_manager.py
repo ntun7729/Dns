@@ -185,7 +185,9 @@ class BridgeTests(unittest.TestCase):
                     "api_token": "super-secret-cloudflare-token",
                     "auto_renew": True,
                     "accept_tos": True,
-                }
+                    "manage_dns_record": False,
+                },
+                'serverAddr = "152.42.239.169"\nserverPort = 7000\n',
             )
             status = certs.status()
             exported = certs.export_config()
@@ -193,6 +195,52 @@ class BridgeTests(unittest.TestCase):
             self.assertNotIn("api_token", exported)
             self.assertNotIn("super-secret-cloudflare-token", json.dumps(exported))
             self.assertEqual(exported["domain"], "dns.example.com")
+
+    def test_cloudflare_a_record_sync_uses_frp_server_ip_and_dns_only(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            certs = CertificateManager(root_path / "bridge", root_path / "technitium")
+            calls = []
+
+            def fake_api(token, method, path, query=None, body=None):
+                calls.append((token, method, path, query, body))
+                if path == "/zones":
+                    return {"success": True, "result": [{"id": "zone123", "name": "example.com"}]}
+                if path == "/zones/zone123/dns_records" and method == "GET":
+                    return {"success": True, "result": []}
+                if path == "/zones/zone123/dns_records" and method == "POST":
+                    return {"success": True, "result": {"id": "record123"}}
+                raise AssertionError((method, path, query, body))
+
+            certs._cloudflare_api = fake_api
+            result = certs.save_cloudflare(
+                {
+                    "domain": "dns.example.com",
+                    "email": "admin@example.com",
+                    "api_token": "super-secret-cloudflare-token",
+                    "auto_renew": True,
+                    "accept_tos": True,
+                    "manage_dns_record": True,
+                },
+                'serverAddr = "152.42.239.169"\nserverPort = 7000\n',
+            )
+            self.assertEqual(result["action"], "created")
+            self.assertEqual(result["target"], "152.42.239.169")
+            create_call = [call for call in calls if call[1] == "POST"][-1]
+            self.assertEqual(create_call[4]["type"], "A")
+            self.assertEqual(create_call[4]["name"], "dns.example.com")
+            self.assertEqual(create_call[4]["content"], "152.42.239.169")
+            self.assertFalse(create_call[4]["proxied"])
+            self.assertEqual(create_call[4]["ttl"], 1)
+
+    def test_frp_server_hostname_can_resolve_to_a_record_target(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            certs = CertificateManager(root_path / "bridge", root_path / "technitium")
+            self.assertEqual(
+                certs._frp_ipv4('serverAddr = "192.0.2.10"\nserverPort = 7000\n'),
+                "192.0.2.10",
+            )
 
     def test_invalid_enabled_without_server(self):
         with self.assertRaises(ValueError):
