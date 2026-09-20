@@ -924,18 +924,19 @@ class CertificateManager:
             self.last_output = "Certificate is valid for more than 30 days; renewal is not due."
             return
 
+        # lego's account/provider/domain/path options are global CLI flags and
+        # must precede the run/renew subcommand. Renewal-specific flags follow it.
         command = [
             self.lego_binary,
-            "run" if first_issue else "renew",
             "--email", email,
             "--dns", "cloudflare",
             "--domains", domain,
             "--path", str(self.acme_dir),
         ]
         if first_issue:
-            command.append("--accept-tos")
+            command.extend(["--accept-tos", "run"])
         else:
-            command.extend(["--days", "30"])
+            command.extend(["renew", "--days", "30", "--no-random-sleep"])
 
         env = {
             "PATH": "/usr/local/bin:/usr/bin:/bin",
