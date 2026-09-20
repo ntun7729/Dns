@@ -158,28 +158,43 @@ jobs:
           print("ANDROID 10 VALIDATION PROBE: PASS")
           PY
 
-      - name: Inspect served certificate chain
+      - name: Inspect served certificate chain and Android 10 trust anchor
         shell: bash
         run: |
           set -euxo pipefail
           tmp="$(mktemp -d)"
           trap 'rm -rf "$tmp"' EXIT
-          timeout 15 openssl s_client             -connect techs.huggy.bond:853             -servername techs.huggy.bond             -showcerts </dev/null >"$tmp/chain.txt" 2>"$tmp/openssl.err"
+          timeout 15 openssl s_client -connect techs.huggy.bond:853 -servername techs.huggy.bond -showcerts </dev/null >"$tmp/chain.txt" 2>"$tmp/openssl.err"
           cat "$tmp/openssl.err"
-          awk '
-            /-----BEGIN CERTIFICATE-----/ {n++; out=sprintf("%s/cert-%d.pem", dir, n)}
-            n {print > out}
-            /-----END CERTIFICATE-----/ {close(out)}
-          ' dir="$tmp" "$tmp/chain.txt"
-          count=0
+
+          python3 - "$tmp/chain.txt" "$tmp" <<'PY'
+          import pathlib, re, sys
+          src = pathlib.Path(sys.argv[1]).read_text()
+          out = pathlib.Path(sys.argv[2])
+          blocks = re.findall(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", src, re.S)
+          print("Served chain certificate count:", len(blocks))
+          for i, block in enumerate(blocks, 1):
+              (out / f"cert-{i}.pem").write_text(block + "\n")
+          if len(blocks) < 2:
+              raise SystemExit("Server did not provide an intermediate chain")
+          PY
+
           for cert in "$tmp"/cert-*.pem; do
-            [ -f "$cert" ] || continue
-            count=$((count+1))
-            echo "=== served certificate $count ==="
+            echo "=== $(basename "$cert") ==="
             openssl x509 -in "$cert" -noout -subject -issuer -dates -fingerprint -sha256
           done
-          echo "Served chain certificate count: $count"
-          [ "$count" -ge 2 ]
+
+          curl -fsSL https://letsencrypt.org/certs/isrgrootx1.pem -o "$tmp/isrg-root-x1.pem"
+          : > "$tmp/untrusted.pem"
+          for cert in "$tmp"/cert-2.pem "$tmp"/cert-3.pem "$tmp"/cert-4.pem; do
+            [ -f "$cert" ] && cat "$cert" >> "$tmp/untrusted.pem"
+          done
+          echo "=== Verify using only ISRG Root X1 ==="
+          if openssl verify -no-CApath -CAfile "$tmp/isrg-root-x1.pem" -untrusted "$tmp/untrusted.pem" "$tmp/cert-1.pem"; then
+            echo "ISRG ROOT X1 ONLY: PASS"
+          else
+            echo "ISRG ROOT X1 ONLY: FAIL"
+          fi
 
       - name: IPv4-forced DoT query
         shell: bash
