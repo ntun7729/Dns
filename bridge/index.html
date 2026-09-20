@@ -5,55 +5,123 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>DNS Bridge</title>
   <style>
-    :root{color-scheme:light dark;font-family:Inter,system-ui,sans-serif}body{margin:0;background:#0f172a;color:#e2e8f0}main{max-width:980px;margin:auto;padding:24px}.top{display:flex;justify-content:space-between;gap:12px;align-items:center}.card{background:#111827;border:1px solid #334155;border-radius:14px;padding:18px;margin:16px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}label{display:block;font-size:13px;color:#94a3b8;margin-bottom:5px}input,button{box-sizing:border-box;width:100%;padding:10px 12px;border-radius:9px;border:1px solid #475569;background:#0b1220;color:#e2e8f0}input[type=checkbox]{width:auto}button{cursor:pointer;background:#1d4ed8;border-color:#2563eb;font-weight:650}.secondary{background:#1f2937;border-color:#475569}.danger{background:#991b1b;border-color:#b91c1c}.row{display:flex;gap:12px;align-items:center}.row>*{flex:1}.small{font-size:13px;color:#94a3b8}.ok{color:#4ade80}.bad{color:#f87171}.warn{color:#fbbf24}pre{white-space:pre-wrap;overflow:auto;background:#020617;padding:12px;border-radius:9px;max-height:280px}.proxy{border-top:1px solid #334155;padding-top:14px;margin-top:14px}.proxy:first-child{border-top:0;margin-top:0;padding-top:0}a{color:#93c5fd}h1,h2,h3{margin-top:0}.hidden{display:none}.pill{display:inline-block;padding:3px 8px;border:1px solid #475569;border-radius:999px;font-size:12px}.actions{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.notice{border-left:3px solid #f59e0b;padding-left:12px}.setup{max-width:520px;margin:60px auto}
+    :root{color-scheme:light dark;font-family:Inter,system-ui,sans-serif}body{margin:0;background:#0f172a;color:#e2e8f0}main{max-width:1050px;margin:auto;padding:24px}.top{display:flex;justify-content:space-between;gap:12px;align-items:center}.card{background:#111827;border:1px solid #334155;border-radius:14px;padding:18px;margin:16px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}label{display:block;font-size:13px;color:#94a3b8;margin-bottom:5px}input,button,textarea{box-sizing:border-box;width:100%;padding:10px 12px;border-radius:9px;border:1px solid #475569;background:#0b1220;color:#e2e8f0}input[type=checkbox]{width:auto}textarea{min-height:340px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;line-height:1.45}button{cursor:pointer;background:#1d4ed8;border-color:#2563eb;font-weight:650}.secondary{background:#1f2937;border-color:#475569}.danger{background:#991b1b;border-color:#b91c1c}.row{display:flex;gap:12px;align-items:center}.row>*{flex:1}.small{font-size:13px;color:#94a3b8}.ok{color:#4ade80}.bad{color:#f87171}.warn{color:#fbbf24}pre{white-space:pre-wrap;overflow:auto;background:#020617;padding:12px;border-radius:9px;max-height:300px}a{color:#93c5fd}h1,h2,h3{margin-top:0}.hidden{display:none}.pill{display:inline-block;padding:3px 8px;border:1px solid #475569;border-radius:999px;font-size:12px}.actions{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.notice{border-left:3px solid #f59e0b;padding-left:12px}.setup{max-width:520px;margin:60px auto}.code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all}.compact{min-height:0}.section-line{border-top:1px solid #334155;margin:18px 0;padding-top:18px}
   </style>
 </head>
 <body><main>
-  <div class="top"><div><h1>DNS Bridge</h1><div class="small">FRP exposure for the Technitium DNS engine</div></div><a href="/">Open Technitium console</a></div>
+  <div class="top"><div><h1>DNS Bridge</h1><div class="small">FRP exposure and TLS certificate management for Technitium DNS Server</div></div><a href="/">Open Technitium console</a></div>
 
   <section id="setup" class="card setup hidden">
     <h2>First-run setup</h2>
-    <p class="small">Create a separate administrator for the FRP bridge. Technitium keeps its own administrator account.</p>
+    <p class="small">Create a separate administrator for the bridge. Technitium keeps its own administrator account.</p>
     <label>Username</label><input id="setupUser" value="admin" autocomplete="username">
     <label style="margin-top:12px">Password (10+ characters)</label><input id="setupPass" type="password" autocomplete="new-password">
     <button style="margin-top:14px" onclick="setup()">Create bridge administrator</button>
-    <div class="small" style="margin-top:10px">You can also restore an old DNS Dashboard backup below before claiming a fresh deployment.</div>
+    <div class="small" style="margin-top:10px">You can also restore a bridge backup before claiming a fresh deployment.</div>
     <input id="setupRestore" type="file" accept="application/json" style="margin-top:10px"><button class="secondary" style="margin-top:8px" onclick="restore('setupRestore')">Restore backup</button>
   </section>
 
   <div id="app" class="hidden">
-    <section class="card"><h2>Status</h2><div class="grid"><div>Technitium <span id="tech" class="pill">checking</span></div><div>FRPC <span id="frpc" class="pill">checking</span></div><div>PID <span id="pid">-</span></div><div>Restarts <span id="restarts">0</span></div></div><div id="error" class="bad small" style="margin-top:10px"></div></section>
-
-    <section class="card"><h2>FRPS connection</h2>
-      <div class="row"><label><input id="enabled" type="checkbox"> Enable FRP</label><label><input id="tls" type="checkbox" checked> TLS for FRPC control connection</label></div>
+    <section class="card">
+      <h2>Status</h2>
       <div class="grid">
-        <div><label>FRPS hostname / IP</label><input id="serverAddr" placeholder="frp.example.com"></div>
-        <div><label>FRPS control port</label><input id="serverPort" type="number" min="1" max="65535" value="7000"></div>
+        <div>Technitium <span id="tech" class="pill">checking</span></div>
+        <div>FRPC <span id="frpc" class="pill">checking</span></div>
+        <div>TLS certificate <span id="certState" class="pill">checking</span></div>
+        <div>FRPC restarts <span id="restarts">0</span></div>
+      </div>
+      <div id="error" class="bad small" style="margin-top:10px"></div>
+    </section>
+
+    <section class="card">
+      <h2>FRP — editable frpc.toml</h2>
+      <p class="small">This is the actual configuration FRPC runs. Saving validates it with <span class="code">frpc verify</span> before restart. FRP token authentication is intentionally rejected. Port 53 is not included in any template or migration.</p>
+      <label><input id="enabled" type="checkbox"> Run FRPC</label>
+      <div class="actions" style="margin:12px 0">
+        <button class="secondary" onclick="dotTemplate()">Load DoT template</button>
+        <button class="secondary" onclick="dotDoqTemplate()">Load DoT + DoQ template</button>
+      </div>
+      <textarea id="frpcToml" spellcheck="false" placeholder='serverAddr = "frp.example.com"'></textarea>
+      <button style="margin-top:12px" onclick="saveToml()">Validate, save & restart FRPC</button>
+    </section>
+
+    <section class="card">
+      <h2>TLS certificate for DoT / DoQ</h2>
+      <div class="grid">
+        <div><label>PKCS#12 path for Technitium</label><div id="pfxPath" class="code">-</div></div>
+        <div><label>PFX password</label><div class="code">(blank)</div></div>
+        <div><label>Certificate expiry</label><div id="certExpiry">-</div></div>
+        <div><label>Certificate mode</label><div id="certMode">-</div></div>
+      </div>
+      <p class="small notice">After the first certificate is created, set Technitium's <b>DNS TLS Certificate Path</b> to the path above and leave its certificate password blank. Technitium monitors the PFX file and reloads renewed certificates automatically.</p>
+
+      <div class="section-line">
+        <h3>Import existing certificate files</h3>
+        <p class="small">Upload a PEM certificate/full chain and its PEM private key. The bridge verifies that the key matches the certificate and converts them to the PFX file Technitium requires.</p>
+        <div class="grid">
+          <div><label>Certificate / fullchain PEM</label><input id="certFile" type="file" accept=".pem,.crt,.cer,application/x-pem-file"></div>
+          <div><label>Private key PEM</label><input id="keyFile" type="file" accept=".pem,.key,application/x-pem-file"></div>
+        </div>
+        <button class="secondary" style="margin-top:12px" onclick="importCertificate()">Import certificate + private key</button>
+      </div>
+
+      <div class="section-line">
+        <h3>Automatic Let's Encrypt certificate via Cloudflare DNS</h3>
+        <p class="small">Uses DNS-01, so the Render/FRP service does not need port 80 or 53 for certificate issuance. Use a Cloudflare API token scoped to the relevant zone with Zone Read and DNS Edit permissions.</p>
+        <div class="grid">
+          <div><label>Certificate hostname</label><input id="cfDomain" placeholder="dns.example.com"></div>
+          <div><label>ACME email</label><input id="cfEmail" type="email" placeholder="admin@example.com"></div>
+          <div><label>Cloudflare API token</label><input id="cfToken" type="password" placeholder="Leave blank to keep saved token"><div id="cfTokenState" class="small"></div></div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <label><input id="cfAuto" type="checkbox" checked> Auto-renew when under 30 days</label>
+          <label><input id="cfTos" type="checkbox"> I accept the ACME / Let's Encrypt terms</label>
+          <label><input id="cfClear" type="checkbox"> Remove saved Cloudflare token</label>
+        </div>
+        <div class="actions" style="margin-top:12px">
+          <button class="secondary" onclick="saveCloudflare()">Save Cloudflare settings</button>
+          <button onclick="renewCertificate()">Fetch / renew certificate if due</button>
+        </div>
+        <div id="certError" class="bad small" style="margin-top:10px"></div>
+        <pre id="certLog">No certificate operation output yet.</pre>
       </div>
     </section>
 
-    <section class="card"><h2>Published DNS services</h2><p class="small">Enable only the protocols you configured inside Technitium. FRP forwards these localhost listeners to your public FRPS server.</p><div id="proxies"></div></section>
+    <section class="card">
+      <div class="actions">
+        <button class="secondary" onclick="downloadBackup()">Download bridge backup</button>
+        <button class="secondary" onclick="document.getElementById('restoreFile').click()">Restore bridge backup</button>
+      </div>
+      <input id="restoreFile" class="hidden" type="file" accept="application/json" onchange="restore('restoreFile')">
+      <p class="small notice">Technitium's native backup remains the primary DNS backup. The bridge backup contains FRP TOML, bridge admin data and non-secret certificate automation settings. Cloudflare API tokens are deliberately not exported.</p>
+    </section>
 
-    <section class="card"><div class="actions"><button onclick="save()">Save & restart FRPC</button><button class="secondary" onclick="downloadBackup()">Download bridge backup</button><button class="secondary" onclick="document.getElementById('restoreFile').click()">Restore backup</button></div><input id="restoreFile" class="hidden" type="file" accept="application/json" onchange="restore('restoreFile')"><p class="small notice">Technitium has its own full DNS backup/restore under its Settings page. Use that for DNS settings, zones, blocklists, apps and statistics. This bridge backup covers FRP settings and its administrator.</p></section>
-
-    <section class="card"><h2>Change bridge administrator</h2><div class="grid"><div><label>Username</label><input id="adminUser"></div><div><label>New password</label><input id="adminPass" type="password" autocomplete="new-password"></div></div><button class="secondary" style="margin-top:12px" onclick="changeAdmin()">Update administrator</button></section>
+    <section class="card">
+      <h2>Change bridge administrator</h2>
+      <div class="grid"><div><label>Username</label><input id="adminUser"></div><div><label>New password</label><input id="adminPass" type="password" autocomplete="new-password"></div></div>
+      <button class="secondary" style="margin-top:12px" onclick="changeAdmin()">Update administrator</button>
+    </section>
 
     <section class="card"><h2>FRPC logs</h2><pre id="logs">No log entries yet.</pre></section>
   </div>
 </main>
 <script>
-const proxyMeta={dot:['DNS-over-TLS','tcp',853],doq:['DNS-over-QUIC','udp',853],dns_tcp:['Plain DNS TCP','tcp',53],dns_udp:['Plain DNS UDP','udp',53]};
 function q(id){return document.getElementById(id)}
 async function req(url,opt={}){const r=await fetch(url,opt);let data={};try{data=await r.json()}catch(e){}if(!r.ok)throw new Error(data.error||('HTTP '+r.status));return data}
-function proxyRows(){q('proxies').innerHTML=Object.entries(proxyMeta).map(([id,m])=>`<div class="proxy"><div class="row"><label><input id="${id}Enabled" type="checkbox"> ${m[0]} (${m[1].toUpperCase()})</label><span id="${id}Probe" class="small"></span></div><div class="grid"><div><label>Local port</label><input id="${id}Local" type="number" min="1" max="65535" value="${m[2]}"></div><div><label>FRPS public port</label><input id="${id}Remote" type="number" min="1" max="65535" value="${m[2]}"></div></div></div>`).join('')}
-function applyConfig(c){const f=c.frp;q('enabled').checked=f.enabled;q('tls').checked=f.transport_tls;q('serverAddr').value=f.server_addr||'';q('serverPort').value=f.server_port||7000;q('adminUser').value=c.username||'admin';for(const [id] of Object.entries(proxyMeta)){const p=f.proxies[id];q(id+'Enabled').checked=!!p.enabled;q(id+'Local').value=p.local_port;q(id+'Remote').value=p.remote_port}}
-async function init(){proxyRows();try{const pub=await req('/_bridge/api/public');if(pub.config.setup_required){q('setup').classList.remove('hidden');return}q('app').classList.remove('hidden');await refresh()}catch(e){alert(e.message)}}
-async function refresh(){try{const s=await req('/_bridge/api/status');applyConfig(s.config);q('tech').textContent=s.technitium_ready?'ready':'not ready';q('tech').className='pill '+(s.technitium_ready?'ok':'bad');q('frpc').textContent=s.frpc.running?'connected/running':(s.frpc.enabled?'stopped':'disabled');q('frpc').className='pill '+(s.frpc.running?'ok':(s.frpc.enabled?'bad':'warn'));q('pid').textContent=s.frpc.pid||'-';q('restarts').textContent=s.frpc.restart_count;q('error').textContent=s.frpc.last_error||'';q('logs').textContent=(s.frpc.logs||[]).join('\n')||'No log entries yet.';for(const [id] of Object.entries(proxyMeta)){const p=s.frpc.local_service_probes[id];q(id+'Probe').textContent=p===true?'local listener reachable':p===false?'local listener NOT reachable':'';q(id+'Probe').className='small '+(p===true?'ok':p===false?'bad':'')}}catch(e){q('error').textContent=e.message}}
-async function setup(){try{await req('/_bridge/api/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:q('setupUser').value,password:q('setupPass').value})});location.reload()}catch(e){alert(e.message)}}
-function payload(){const proxies={};for(const [id,m] of Object.entries(proxyMeta))proxies[id]={enabled:q(id+'Enabled').checked,type:m[1],local_port:+q(id+'Local').value,remote_port:+q(id+'Remote').value};return{enabled:q('enabled').checked,transport_tls:q('tls').checked,server_addr:q('serverAddr').value,server_port:+q('serverPort').value,proxies}}
-async function save(){try{await req('/_bridge/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload())});await refresh()}catch(e){alert(e.message)}}
-async function changeAdmin(){try{await req('/_bridge/api/admin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:q('adminUser').value,password:q('adminPass').value})});q('adminPass').value='';alert('Administrator updated. Your browser may ask for the new credentials on the next request.')}catch(e){alert(e.message)}}
+function post(url,data){return req(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})}
+function dotTemplate(){q('frpcToml').value='serverAddr = "frp.example.com"\nserverPort = 7000\ntransport.tls.enable = true\n\n[[proxies]]\nname = "dot"\ntype = "tcp"\nlocalIP = "127.0.0.1"\nlocalPort = 853\nremotePort = 853\n'}
+function dotDoqTemplate(){q('frpcToml').value='serverAddr = "frp.example.com"\nserverPort = 7000\ntransport.tls.enable = true\n\n[[proxies]]\nname = "dot"\ntype = "tcp"\nlocalIP = "127.0.0.1"\nlocalPort = 853\nremotePort = 853\n\n[[proxies]]\nname = "doq"\ntype = "udp"\nlocalIP = "127.0.0.1"\nlocalPort = 853\nremotePort = 853\n'}
+function applyConfig(c){q('enabled').checked=!!c.frp.enabled;q('frpcToml').value=c.frpc_toml||'';q('adminUser').value=c.username||'admin'}
+function applyCertificate(c){if(!c)return;q('pfxPath').textContent=c.pfx_path||'-';q('certExpiry').textContent=c.expires||'-';q('certMode').textContent=c.mode||'-';q('certState').textContent=c.running?'working':(c.certificate_exists?'installed':'missing');q('certState').className='pill '+(c.running?'warn':(c.certificate_exists?'ok':'bad'));q('cfDomain').value=c.domain||'';q('cfEmail').value=c.email||'';q('cfAuto').checked=!!c.auto_renew;q('cfTos').checked=!!c.accept_tos;q('cfTokenState').textContent=c.cloudflare_token_configured?'API token is saved. Leave the field blank to keep it.':'No Cloudflare API token is saved.';q('certError').textContent=c.last_error||'';q('certLog').textContent=c.last_output||'No certificate operation output yet.'}
+async function init(){try{const pub=await req('/_bridge/api/public');if(pub.config.setup_required){q('setup').classList.remove('hidden');return}q('app').classList.remove('hidden');await refresh()}catch(e){alert(e.message)}}
+async function refresh(){try{const s=await req('/_bridge/api/status');applyConfig(s.config);applyCertificate(s.certificate);q('tech').textContent=s.technitium_ready?'ready':'not ready';q('tech').className='pill '+(s.technitium_ready?'ok':'bad');q('frpc').textContent=s.frpc.running?'running':(s.frpc.enabled?'stopped':'disabled');q('frpc').className='pill '+(s.frpc.running?'ok':(s.frpc.enabled?'bad':'warn'));q('restarts').textContent=s.frpc.restart_count;q('error').textContent=s.frpc.last_error||'';q('logs').textContent=(s.frpc.logs||[]).join('\n')||'No log entries yet.'}catch(e){q('error').textContent=e.message}}
+async function setup(){try{await post('/_bridge/api/setup',{username:q('setupUser').value,password:q('setupPass').value});location.reload()}catch(e){alert(e.message)}}
+async function saveToml(){try{await post('/_bridge/api/frpc-toml',{enabled:q('enabled').checked,toml:q('frpcToml').value});await refresh()}catch(e){alert(e.message)}}
+async function importCertificate(){const cert=q('certFile').files[0],key=q('keyFile').files[0];if(!cert||!key){alert('Choose both the certificate PEM and private key PEM files.');return}try{await post('/_bridge/api/certificate/import',{certificate_pem:await cert.text(),private_key_pem:await key.text()});q('certFile').value='';q('keyFile').value='';await refresh()}catch(e){alert(e.message)}}
+async function saveCloudflare(){try{await post('/_bridge/api/certificate/cloudflare',{domain:q('cfDomain').value,email:q('cfEmail').value,api_token:q('cfToken').value,auto_renew:q('cfAuto').checked,accept_tos:q('cfTos').checked,clear_token:q('cfClear').checked});q('cfToken').value='';q('cfClear').checked=false;await refresh()}catch(e){alert(e.message)}}
+async function renewCertificate(){try{const r=await post('/_bridge/api/certificate/renew',{});if(!r.started)alert('A certificate operation is already running.');await refresh()}catch(e){alert(e.message)}}
+async function changeAdmin(){try{await post('/_bridge/api/admin',{username:q('adminUser').value,password:q('adminPass').value});q('adminPass').value='';alert('Administrator updated. Your browser may ask for the new credentials on the next request.')}catch(e){alert(e.message)}}
 function downloadBackup(){location.href='/_bridge/api/backup'}
-async function restore(inputId){const f=q(inputId).files[0];if(!f)return;try{const backup=JSON.parse(await f.text());await req('/_bridge/api/restore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({backup})});alert('Backup restored.');location.reload()}catch(e){alert(e.message)}}
+async function restore(inputId){const f=q(inputId).files[0];if(!f)return;try{const backup=JSON.parse(await f.text());await post('/_bridge/api/restore',{backup});alert('Backup restored.');location.reload()}catch(e){alert(e.message)}}
 init();setInterval(()=>{if(!q('app').classList.contains('hidden'))refresh()},5000);
 </script></body></html>
