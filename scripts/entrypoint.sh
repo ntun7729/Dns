@@ -2,20 +2,53 @@
 set -eu
 
 PORT="${PORT:-10000}"
+FIXED_PUBLIC_PORT="${FIXED_PUBLIC_PORT:-10000}"
 TECHNITIUM_CONFIG_DIR="${TECHNITIUM_CONFIG_DIR:-/data/technitium}"
 DNS_BRIDGE_DATA_DIR="${DNS_BRIDGE_DATA_DIR:-/data/bridge}"
+
+case "$PORT" in
+  ""|*[!0-9]*) echo "Invalid PORT: $PORT" >&2; exit 1 ;;
+esac
+case "$FIXED_PUBLIC_PORT" in
+  ""|*[!0-9]*) echo "Invalid FIXED_PUBLIC_PORT: $FIXED_PUBLIC_PORT" >&2; exit 1 ;;
+esac
 
 mkdir -p "$TECHNITIUM_CONFIG_DIR" "$DNS_BRIDGE_DATA_DIR" /tmp/nginx-client /tmp/nginx-proxy
 chmod 700 "$DNS_BRIDGE_DATA_DIR" || true
 
-# These are infrastructure bindings, not operational DNS settings. Keeping the
-# Technitium console on loopback allows nginx to be the single Render/Railway
-# HTTP ingress while all DNS behavior remains dashboard-managed by Technitium.
-export DNS_SERVER_WEB_SERVICE_LOCAL_ADDRESSES="127.0.0.1"
+# These variables are used by Technitium only when its webservice.config is
+# created for the first time. 0.0.0.0 makes a fresh deployment reachable both
+# through loopback and the container address. Existing persistent Technitium
+# configuration is left untouched.
+export DNS_SERVER_WEB_SERVICE_LOCAL_ADDRESSES="0.0.0.0"
 export DNS_SERVER_WEB_SERVICE_HTTP_PORT="5380"
 export DNS_SERVER_WEB_SERVICE_ENABLE_HTTPS="false"
 
-sed "s/__PORT__/${PORT}/g" /opt/dns-bridge/nginx.conf.template > /tmp/nginx.conf
+if [ "$PORT" = "$FIXED_PUBLIC_PORT" ]; then
+  FIXED_LISTEN=""
+else
+  FIXED_LISTEN="listen $FIXED_PUBLIC_PORT;"
+fi
+
+CONTAINER_IP="$(hostname -i 2>/dev/null | awk '{ for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+\./) { print $i; exit } }')"
+if [ -n "$CONTAINER_IP" ] && [ "$CONTAINER_IP" != "127.0.0.1" ]; then
+  TECH_WEB_BACKUP="server $CONTAINER_IP:5380 backup;"
+  TECH_DOH_BACKUP="server $CONTAINER_IP:8053 backup;"
+else
+  CONTAINER_IP="127.0.0.1"
+  TECH_WEB_BACKUP=""
+  TECH_DOH_BACKUP=""
+fi
+
+sed \
+  -e "s|__PORT__|$PORT|g" \
+  -e "s|__FIXED_LISTEN__|$FIXED_LISTEN|g" \
+  -e "s|__TECH_WEB_BACKUP__|$TECH_WEB_BACKUP|g" \
+  -e "s|__TECH_DOH_BACKUP__|$TECH_DOH_BACKUP|g" \
+  /opt/dns-bridge/nginx.conf.template > /tmp/nginx.conf
+
+echo "Public nginx listeners: Railway PORT=$PORT, fixed port=$FIXED_PUBLIC_PORT"
+echo "Technitium proxy targets: 127.0.0.1 and container IPv4 $CONTAINER_IP"
 
 /usr/bin/dotnet /opt/technitium/dns/DnsServerApp.dll "$TECHNITIUM_CONFIG_DIR" &
 TECH_PID=$!
