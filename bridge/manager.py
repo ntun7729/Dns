@@ -1111,10 +1111,31 @@ class CertificateManager:
             raise ValueError("ACME client completed but certificate files were not found.")
         return cert, key, issuer if issuer.is_file() else None
 
-    def _build_lego_command(self, domain: str, email: str, first_issue: bool) -> list[str]:
-        # lego v5 makes the certificate/account/storage/challenge flags local
-        # to the "run" command. There is no separate "renew" command: "run"
-        # obtains a missing certificate and renews an existing one when due.
+    def _certificate_key_algorithm(self, path: Path | None = None) -> str | None:
+        certificate = path if path is not None else self.cert_pem_path
+        if not certificate.is_file():
+            return None
+        try:
+            output = self._openssl(["x509", "-in", str(certificate), "-noout", "-text"]).stdout
+        except ValueError:
+            return None
+        if "Public Key Algorithm: rsaEncryption" in output:
+            return "RSA"
+        if "Public Key Algorithm: id-ecPublicKey" in output:
+            return "EC"
+        return "OTHER"
+
+    def _build_lego_command(
+        self,
+        domain: str,
+        email: str,
+        first_issue: bool,
+        force_compat_reissue: bool = False,
+    ) -> list[str]:
+        # Use RSA2048 intentionally. Let's Encrypt's current ECDSA Generation-Y
+        # chain is rooted through ISRG Root X2, which is not in older Android
+        # trust stores. The RSA Generation-Y hierarchy is cross-signed from the
+        # older, widely deployed ISRG Root X1.
         command = [
             self.lego_binary,
             "run",
@@ -1122,9 +1143,12 @@ class CertificateManager:
             "--dns", "cloudflare",
             "--domains", domain,
             "--path", str(self.acme_dir),
+            "--key-type", "RSA2048",
         ]
         if first_issue:
             command.append("--accept-tos")
+        elif force_compat_reissue:
+            command.extend(["--renew-force", "--no-random-sleep"])
         else:
             command.extend(["--renew-days", "30", "--no-random-sleep"])
         return command
@@ -1143,6 +1167,8 @@ class CertificateManager:
             raise ValueError("Cloudflare API token is empty.")
         lego_cert_path = self.acme_dir / "certificates" / f"{domain}.crt"
         first_issue = not lego_cert_path.is_file()
+        current_key_algorithm = self._certificate_key_algorithm(lego_cert_path)
+        force_compat_reissue = bool(not first_issue and current_key_algorithm != "RSA")
         if first_issue and not cfg.get("accept_tos"):
             raise ValueError("Accept the ACME/Let's Encrypt terms before requesting the first certificate.")
         if cfg.get("manage_dns_record"):
@@ -1151,11 +1177,16 @@ class CertificateManager:
                 raise ValueError("Automatic Cloudflare A-record target is missing. Save the Cloudflare settings again.")
             self._sync_cloudflare_a_record(domain, target, token)
 
-        if not first_issue and not self._expires_within(30):
-            self.last_output = "Certificate is valid for more than 30 days; renewal is not due."
+        if not first_issue and not force_compat_reissue and not self._expires_within(30):
+            self.last_output = "Certificate is already RSA and valid for more than 30 days; renewal is not due."
             return
 
-        command = self._build_lego_command(domain, email, first_issue)
+        command = self._build_lego_command(
+            domain,
+            email,
+            first_issue,
+            force_compat_reissue=force_compat_reissue,
+        )
 
         env = {
             "PATH": "/usr/local/bin:/usr/bin:/bin",
@@ -1218,7 +1249,13 @@ class CertificateManager:
                 with self.lock:
                     cfg = self._read_config()
                     should_check = cfg.get("mode") == "cloudflare" and bool(cfg.get("auto_renew")) and self.token_path.is_file()
-                if should_check and self._expires_within(30):
+                lego_cert_path = self.acme_dir / "certificates" / f"{cfg.get('domain', '')}.crt"
+                needs_android_compat = bool(
+                    should_check
+                    and lego_cert_path.is_file()
+                    and self._certificate_key_algorithm(lego_cert_path) != "RSA"
+                )
+                if should_check and (needs_android_compat or self._expires_within(30)):
                     self.request_renew()
             except Exception as exc:
                 with self.lock:
@@ -1253,6 +1290,8 @@ class CertificateManager:
                 "pfx_path": str(self.pfx_path),
                 "pfx_password": "",
                 "certificate_exists": self.pfx_path.is_file(),
+                "key_algorithm": self._certificate_key_algorithm(),
+                "android_legacy_compatible": self._certificate_key_algorithm() == "RSA",
                 "expires": self._expiry(),
                 "running": self.running,
                 "last_attempt": self.last_attempt,
