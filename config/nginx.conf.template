@@ -14,13 +14,27 @@ http {
     client_body_temp_path /tmp/nginx-client;
     proxy_temp_path /tmp/nginx-proxy;
 
+    upstream technitium_web {
+        server 127.0.0.1:5380 max_fails=1 fail_timeout=1s;
+        __TECH_WEB_BACKUP__
+    }
+
+    upstream technitium_doh {
+        server 127.0.0.1:8053 max_fails=1 fail_timeout=1s;
+        __TECH_DOH_BACKUP__
+    }
+
     server {
         listen __PORT__ default_server;
+        __FIXED_LISTEN__
         server_name _;
 
+        # Railway health checks only need to prove that the public nginx
+        # frontend is accepting HTTP. The entrypoint separately terminates the
+        # container if Technitium or the bridge process exits.
         location = /_healthz {
-            proxy_pass http://127.0.0.1:9080/_healthz;
-            proxy_http_version 1.1;
+            default_type application/json;
+            return 200 '{"ok":true,"frontend":"nginx"}';
         }
 
         location /_bridge/ {
@@ -38,11 +52,8 @@ http {
             return 302 /_bridge/;
         }
 
-        # Optional DoH bridge. Enable DNS-over-HTTP on port 8053 in Technitium.
-        # Render/Railway terminates HTTPS, then nginx forwards the DNS wire-format
-        # request to Technitium over localhost HTTP.
         location = /dns-query {
-            proxy_pass http://127.0.0.1:8053/dns-query;
+            proxy_pass http://technitium_doh/dns-query;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -52,7 +63,7 @@ http {
         }
 
         location / {
-            proxy_pass http://127.0.0.1:5380;
+            proxy_pass http://technitium_web;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
@@ -60,6 +71,7 @@ http {
             proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
             proxy_set_header Upgrade $http_upgrade;
             proxy_set_header Connection "upgrade";
+            proxy_next_upstream error timeout http_502 http_503 http_504;
             proxy_buffering off;
         }
     }
