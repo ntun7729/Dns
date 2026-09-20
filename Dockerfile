@@ -48,6 +48,9 @@ RUN set -eux; \
     tar -xzf "/tmp/$archive" -C /tmp/lego-extract; \
     install -m 0755 /tmp/lego-extract/lego /usr/local/bin/lego; \
     lego --version; \
+    lego run --help | grep -q -- "--email"; \
+    lego run --help | grep -q -- "--dns"; \
+    lego run --help | grep -q -- "--renew-days"; \
     rm -rf /tmp/lego* "/tmp/$archive"
 
 RUN mkdir -p /opt/dns-bridge /data/technitium /data/bridge /tmp/nginx-client /tmp/nginx-proxy
