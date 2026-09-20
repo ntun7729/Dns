@@ -18,6 +18,9 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 CONFIG_FORMAT = "dns-bridge-config-v1"
 BACKUP_FORMAT = "dns-bridge-backup-v1"
@@ -39,6 +42,8 @@ DEFAULT_CERT_CONFIG = {
     "email": "",
     "auto_renew": False,
     "accept_tos": False,
+    "manage_dns_record": True,
+    "dns_target": "",
     "updated_at": None,
 }
 
@@ -703,6 +708,9 @@ class CertificateManager:
         self.last_output = ""
         self.last_attempt: str | None = None
         self.last_success: str | None = None
+        self.last_dns_sync: str | None = None
+        self.last_dns_error: str | None = None
+        self.last_dns_action: str | None = None
         self.stop_event = threading.Event()
         self.auto_thread: threading.Thread | None = None
         self._ensure_dirs()
@@ -730,6 +738,8 @@ class CertificateManager:
         cfg["email"] = str(cfg.get("email") or "").strip()
         cfg["auto_renew"] = bool(cfg.get("auto_renew"))
         cfg["accept_tos"] = bool(cfg.get("accept_tos"))
+        cfg["manage_dns_record"] = bool(cfg.get("manage_dns_record", True))
+        cfg["dns_target"] = str(cfg.get("dns_target") or "").strip()
         return cfg
 
     def _write_config(self, cfg: Mapping[str, Any]) -> None:
@@ -786,15 +796,188 @@ class CertificateManager:
                 document["email"] = self._validate_email(email)
             document["auto_renew"] = bool(cfg.get("auto_renew"))
             document["accept_tos"] = bool(cfg.get("accept_tos"))
+            document["manage_dns_record"] = bool(cfg.get("manage_dns_record", True))
+            document["dns_target"] = str(cfg.get("dns_target") or "").strip()
         self._write_config(document)
 
-    def save_cloudflare(self, payload: Mapping[str, Any]) -> None:
+    @staticmethod
+    def _frp_ipv4(frpc_toml: str) -> str:
+        match = re.search(r'(?mi)^\s*serverAddr\s*=\s*"([^"]+)"\s*$', frpc_toml)
+        if not match:
+            raise ValueError("Could not find serverAddr in the saved frpc.toml.")
+        host = match.group(1).strip()
+        try:
+            socket.inet_pton(socket.AF_INET, host)
+            return host
+        except OSError:
+            pass
+        try:
+            infos = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
+        except socket.gaierror as exc:
+            raise ValueError(f"FRPS hostname {host!r} could not be resolved to IPv4.") from exc
+        addresses = sorted({info[4][0] for info in infos if info and info[4]})
+        if not addresses:
+            raise ValueError(f"FRPS hostname {host!r} has no IPv4 address for an A record.")
+        return addresses[0]
+
+    @staticmethod
+    def _cloudflare_error_message(payload: Any) -> str:
+        if not isinstance(payload, Mapping):
+            return "unknown Cloudflare API error"
+        errors = payload.get("errors")
+        if isinstance(errors, list):
+            messages = []
+            for item in errors:
+                if isinstance(item, Mapping):
+                    message = str(item.get("message") or "").strip()
+                    code = item.get("code")
+                    if message:
+                        messages.append(f"{code}: {message}" if code is not None else message)
+            if messages:
+                return "; ".join(messages)
+        return str(payload.get("message") or "unknown Cloudflare API error")
+
+    def _cloudflare_api(
+        self,
+        token: str,
+        method: str,
+        path: str,
+        query: Mapping[str, Any] | None = None,
+        body: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        url = "https://api.cloudflare.com/client/v4" + path
+        if query:
+            url += "?" + urlencode({key: value for key, value in query.items() if value is not None})
+        payload = None if body is None else json.dumps(body, separators=(",", ":")).encode()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "User-Agent": "dns-bridge/1",
+        }
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
+        request = Request(url, data=payload, headers=headers, method=method)
+        try:
+            with urlopen(request, timeout=30) as response:
+                raw = response.read()
+        except HTTPError as exc:
+            try:
+                error_payload = json.loads(exc.read().decode("utf-8", "replace"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                error_payload = {}
+            raise ValueError(
+                f"Cloudflare API HTTP {exc.code}: {self._cloudflare_error_message(error_payload)}"
+            ) from exc
+        except URLError as exc:
+            raise ValueError(f"Cloudflare API request failed: {exc.reason}") from exc
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ValueError("Cloudflare API returned invalid JSON.") from exc
+        if not isinstance(parsed, dict) or not parsed.get("success"):
+            raise ValueError("Cloudflare API error: " + self._cloudflare_error_message(parsed))
+        return parsed
+
+    def _find_cloudflare_zone(self, token: str, domain: str) -> tuple[str, str]:
+        labels = domain.rstrip(".").split(".")
+        # Try the FQDN and then progressively shorter suffixes. The first
+        # active Cloudflare zone returned is the most-specific matching zone.
+        for index in range(max(1, len(labels) - 10)):
+            candidate = ".".join(labels[index:])
+            if "." not in candidate:
+                continue
+            response = self._cloudflare_api(
+                token,
+                "GET",
+                "/zones",
+                {"name": candidate, "status": "active", "per_page": 1},
+            )
+            result = response.get("result")
+            if isinstance(result, list) and result:
+                zone = result[0]
+                if isinstance(zone, Mapping) and zone.get("id") and str(zone.get("name", "")).lower() == candidate.lower():
+                    return str(zone["id"]), str(zone["name"])
+        raise ValueError(
+            f"Cloudflare zone for {domain} was not found. The token needs Zone Read access to the zone."
+        )
+
+    def _sync_cloudflare_a_record(self, domain: str, target: str, token: str) -> dict[str, str]:
+        try:
+            socket.inet_pton(socket.AF_INET, target)
+        except OSError as exc:
+            raise ValueError(f"Cloudflare A-record target {target!r} is not a valid IPv4 address.") from exc
+
+        zone_id, zone_name = self._find_cloudflare_zone(token, domain)
+        records_response = self._cloudflare_api(
+            token,
+            "GET",
+            f"/zones/{zone_id}/dns_records",
+            {"name": domain, "per_page": 100},
+        )
+        records = records_response.get("result")
+        if not isinstance(records, list):
+            records = []
+
+        a_record = None
+        conflicting = []
+        for record in records:
+            if not isinstance(record, Mapping):
+                continue
+            record_type = str(record.get("type") or "").upper()
+            if record_type == "A" and a_record is None:
+                a_record = record
+            elif record_type in {"CNAME", "NS"}:
+                conflicting.append(record_type)
+
+        body = {
+            "type": "A",
+            "name": domain,
+            "content": target,
+            "ttl": 1,
+            "proxied": False,
+        }
+        if a_record is not None and a_record.get("id"):
+            current_content = str(a_record.get("content") or "")
+            current_proxied = bool(a_record.get("proxied"))
+            if current_content == target and not current_proxied:
+                action = "unchanged"
+            else:
+                self._cloudflare_api(
+                    token,
+                    "PATCH",
+                    f"/zones/{zone_id}/dns_records/{a_record['id']}",
+                    body=body,
+                )
+                action = "updated"
+        else:
+            if conflicting:
+                kinds = ", ".join(sorted(set(conflicting)))
+                raise ValueError(
+                    f"Cannot create A record for {domain}: a conflicting {kinds} record already exists."
+                )
+            self._cloudflare_api(
+                token,
+                "POST",
+                f"/zones/{zone_id}/dns_records",
+                body=body,
+            )
+            action = "created"
+
+        with self.lock:
+            self.last_dns_sync = now_iso()
+            self.last_dns_error = None
+            self.last_dns_action = action
+        return {"action": action, "zone": zone_name, "name": domain, "target": target}
+
+    def save_cloudflare(self, payload: Mapping[str, Any], frpc_toml: str) -> dict[str, str] | None:
         domain = self._validate_domain(payload.get("domain"))
         email = self._validate_email(payload.get("email"))
         api_token = str(payload.get("api_token") or "")
         if len(api_token) > 4096:
             raise ValueError("Cloudflare API token is too long.")
         clear_token = _bool(payload.get("clear_token", False), "clear_token")
+        manage_dns_record = _bool(payload.get("manage_dns_record", True), "manage_dns_record")
+        dns_target = self._frp_ipv4(frpc_toml) if manage_dns_record else ""
         cfg = {
             "format": CERT_CONFIG_FORMAT,
             "mode": "cloudflare",
@@ -802,6 +985,8 @@ class CertificateManager:
             "email": email,
             "auto_renew": _bool(payload.get("auto_renew", True), "auto_renew"),
             "accept_tos": _bool(payload.get("accept_tos", False), "accept_tos"),
+            "manage_dns_record": manage_dns_record,
+            "dns_target": dns_target,
         }
         with self.lock:
             self._write_config(cfg)
@@ -812,6 +997,24 @@ class CertificateManager:
                     self.token_path.unlink()
                 except FileNotFoundError:
                     pass
+
+        if not manage_dns_record:
+            with self.lock:
+                self.last_dns_error = None
+                self.last_dns_action = None
+            return None
+
+        if not self.token_path.is_file():
+            raise ValueError("Cloudflare API token is required to create or update the DNS A record.")
+        token = self.token_path.read_text(encoding="utf-8").strip()
+        if not token:
+            raise ValueError("Cloudflare API token is empty.")
+        try:
+            return self._sync_cloudflare_a_record(domain, dns_target, token)
+        except ValueError as exc:
+            with self.lock:
+                self.last_dns_error = str(exc)
+            raise
 
     def _openssl(self, args: list[str], timeout: int = 20) -> subprocess.CompletedProcess[str]:
         try:
@@ -942,6 +1145,12 @@ class CertificateManager:
         first_issue = not lego_cert_path.is_file()
         if first_issue and not cfg.get("accept_tos"):
             raise ValueError("Accept the ACME/Let's Encrypt terms before requesting the first certificate.")
+        if cfg.get("manage_dns_record"):
+            target = str(cfg.get("dns_target") or "").strip()
+            if not target:
+                raise ValueError("Automatic Cloudflare A-record target is missing. Save the Cloudflare settings again.")
+            self._sync_cloudflare_a_record(domain, target, token)
+
         if not first_issue and not self._expires_within(30):
             self.last_output = "Certificate is valid for more than 30 days; renewal is not due."
             return
@@ -1035,6 +1244,11 @@ class CertificateManager:
                 "email": cfg.get("email"),
                 "auto_renew": bool(cfg.get("auto_renew")),
                 "accept_tos": bool(cfg.get("accept_tos")),
+                "manage_dns_record": bool(cfg.get("manage_dns_record", True)),
+                "dns_target": str(cfg.get("dns_target") or ""),
+                "dns_record_last_sync": self.last_dns_sync,
+                "dns_record_last_action": self.last_dns_action,
+                "dns_record_last_error": self.last_dns_error,
                 "cloudflare_token_configured": self.token_path.is_file() and self.token_path.stat().st_size > 0,
                 "pfx_path": str(self.pfx_path),
                 "pfx_password": "",
@@ -1266,8 +1480,8 @@ class BridgeApp:
                         app.certificates.import_manual(certificate_pem, private_key_pem)
                         self._json({"ok": True, "certificate": app.certificates.status()})
                     elif path == "/_bridge/api/certificate/cloudflare":
-                        app.certificates.save_cloudflare(data)
-                        self._json({"ok": True, "certificate": app.certificates.status()})
+                        dns_record = app.certificates.save_cloudflare(data, app.store.get_frpc_toml())
+                        self._json({"ok": True, "certificate": app.certificates.status(), "dns_record": dns_record})
                     elif path == "/_bridge/api/certificate/renew":
                         started = app.certificates.request_renew()
                         self._json({"ok": True, "started": started, "certificate": app.certificates.status()})
