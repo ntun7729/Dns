@@ -54,7 +54,15 @@ RUN mkdir -p /opt/dns-bridge /data/technitium /data/bridge /tmp/nginx-client /tm
 COPY bridge/manager.py bridge/index.html /opt/dns-bridge/
 COPY config/nginx.conf.template /opt/dns-bridge/nginx.conf.template
 COPY scripts/entrypoint.sh /opt/dns-bridge/entrypoint.sh
-RUN chmod 0755 /opt/dns-bridge/entrypoint.sh
+RUN chmod 0755 /opt/dns-bridge/entrypoint.sh \
+    && sed \
+        -e 's|__PORT__|10000|g' \
+        -e 's|__FIXED_LISTEN__||g' \
+        -e 's|__TECH_WEB_BACKUP__||g' \
+        -e 's|__TECH_DOH_BACKUP__||g' \
+        /opt/dns-bridge/nginx.conf.template > /tmp/nginx.test.conf \
+    && nginx -t -c /tmp/nginx.test.conf \
+    && rm -f /tmp/nginx.test.conf
 
 ENV PORT=10000 \
     TECHNITIUM_CONFIG_DIR=/data/technitium \
