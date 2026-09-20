@@ -1,0 +1,139 @@
+name: DoT diagnostic
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/dot-diagnostic.yml"
+
+jobs:
+  test-dot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Public DNS resolution
+        shell: bash
+        run: |
+          set -euxo pipefail
+          echo "=== getent ahosts ==="
+          getent ahosts techs.huggy.bond || true
+          echo
+          echo "=== Python getaddrinfo ==="
+          python3 - <<'PY'
+          import socket
+          host = "techs.huggy.bond"
+          seen = set()
+          for family, socktype, proto, canonname, sockaddr in socket.getaddrinfo(host, 853, type=socket.SOCK_STREAM):
+              key = (family, sockaddr[0])
+              if key in seen:
+                  continue
+              seen.add(key)
+              print(("IPv6" if family == socket.AF_INET6 else "IPv4" if family == socket.AF_INET else str(family)), sockaddr[0])
+          PY
+
+      - name: TLS certificate and SNI
+        shell: bash
+        run: |
+          set -euxo pipefail
+          timeout 15 openssl s_client             -connect techs.huggy.bond:853             -servername techs.huggy.bond             -verify_hostname techs.huggy.bond             -verify_return_error             -brief </dev/null
+
+      - name: Real DNS-over-TLS query
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          import ipaddress
+          import socket
+          import ssl
+          import struct
+
+          HOST = "techs.huggy.bond"
+          PORT = 853
+          QNAME = "google.com"
+
+          def encode_name(name):
+              return b"".join(bytes([len(label)]) + label.encode("ascii") for label in name.split(".")) + b"\x00"
+
+          def read_exact(sock, count):
+              data = b""
+              while len(data) < count:
+                  chunk = sock.recv(count - len(data))
+                  if not chunk:
+                      raise RuntimeError(f"unexpected EOF after {len(data)}/{count} bytes")
+                  data += chunk
+              return data
+
+          txid = 0x5A5A
+          flags = 0x0100  # recursion desired
+          query = struct.pack("!HHHHHH", txid, flags, 1, 0, 0, 0)
+          query += encode_name(QNAME)
+          query += struct.pack("!HH", 1, 1)  # A IN
+
+          context = ssl.create_default_context()
+          addresses = socket.getaddrinfo(HOST, PORT, type=socket.SOCK_STREAM)
+          print("Resolved endpoints:")
+          for family, _, _, _, sockaddr in addresses:
+              print(" ", "IPv6" if family == socket.AF_INET6 else "IPv4", sockaddr[0])
+
+          with socket.create_connection((HOST, PORT), timeout=10) as raw:
+              print("TCP peer:", raw.getpeername())
+              with context.wrap_socket(raw, server_hostname=HOST) as tls:
+                  print("TLS:", tls.version(), tls.cipher()[0])
+                  cert = tls.getpeercert()
+                  print("Certificate subject:", cert.get("subject"))
+                  print("Certificate SAN:", cert.get("subjectAltName"))
+                  tls.sendall(struct.pack("!H", len(query)) + query)
+                  response_len = struct.unpack("!H", read_exact(tls, 2))[0]
+                  response = read_exact(tls, response_len)
+
+          if len(response) < 12:
+              raise RuntimeError("short DNS response")
+          rid, rflags, qd, an, ns, ar = struct.unpack("!HHHHHH", response[:12])
+          rcode = rflags & 0xF
+          qr = (rflags >> 15) & 1
+          ra = (rflags >> 7) & 1
+          print(f"DNS response: bytes={len(response)} id=0x{rid:04x} qr={qr} rcode={rcode} qd={qd} an={an} ns={ns} ar={ar} ra={ra}")
+          if rid != txid:
+              raise RuntimeError(f"transaction ID mismatch: {rid:#x}")
+          if qr != 1:
+              raise RuntimeError("not a DNS response")
+          if rcode != 0:
+              raise RuntimeError(f"DNS RCODE was {rcode}")
+          if an < 1:
+              raise RuntimeError("DNS response had no answers")
+          if ra != 1:
+              raise RuntimeError("recursion is not available")
+          print("REAL DOT QUERY: PASS")
+          PY
+
+      - name: IPv4-forced DoT query
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          import socket, ssl, struct
+          host = "techs.huggy.bond"
+          ip = socket.gethostbyname(host)
+          print("IPv4 target:", ip)
+          qname = b"".join(bytes([len(x)]) + x.encode() for x in "example.com".split(".")) + b"\x00"
+          msg = struct.pack("!HHHHHH", 0x4242, 0x0100, 1, 0, 0, 0) + qname + struct.pack("!HH", 1, 1)
+          ctx = ssl.create_default_context()
+          with socket.create_connection((ip, 853), timeout=10) as raw:
+              with ctx.wrap_socket(raw, server_hostname=host) as s:
+                  s.sendall(struct.pack("!H", len(msg)) + msg)
+                  hdr = s.recv(2)
+                  if len(hdr) != 2:
+                      raise SystemExit("No DoT length prefix returned")
+                  n = struct.unpack("!H", hdr)[0]
+                  data = b""
+                  while len(data) < n:
+                      part = s.recv(n-len(data))
+                      if not part:
+                          raise SystemExit("EOF before full DNS response")
+                      data += part
+          _, flags, _, an, _, _ = struct.unpack("!HHHHHH", data[:12])
+          print("IPv4 DoT response bytes:", len(data), "answers:", an, "rcode:", flags & 0xF)
+          if (flags & 0xF) != 0 or an < 1:
+              raise SystemExit("IPv4 DoT query failed")
+          print("IPV4 DOT QUERY: PASS")
+          PY
