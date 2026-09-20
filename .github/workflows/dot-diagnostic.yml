@@ -106,6 +106,81 @@ jobs:
           print("REAL DOT QUERY: PASS")
           PY
 
+      - name: Android 10-style Private DNS validation query
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          import os
+          import random
+          import socket
+          import ssl
+          import struct
+          import string
+
+          host = "techs.huggy.bond"
+          alphabet = "abcdefhijklmnopqrstuvwxyzABCDEFHIJKLMNOPQRSTUVWXYZ0123456789"
+          prefix = "".join(random.choice(alphabet) for _ in range(6))
+          qname_text = prefix + "-dnsotls-ds.metric.gstatic.com"
+          print("Android-style validation name:", qname_text)
+
+          def encode_name(name):
+              return b"".join(bytes([len(label)]) + label.encode("ascii") for label in name.split(".")) + b"\x00"
+
+          txid = int.from_bytes(os.urandom(2), "big")
+          # Android 10 uses RD=1 and QTYPE AAAA / QCLASS IN.
+          query = struct.pack("!HHHHHH", txid, 0x0100, 1, 0, 0, 0)
+          query += encode_name(qname_text)
+          query += struct.pack("!HH", 28, 1)
+
+          def read_exact(sock, n):
+              out=b""
+              while len(out) < n:
+                  chunk=sock.recv(n-len(out))
+                  if not chunk:
+                      raise RuntimeError("EOF before complete DoT response")
+                  out += chunk
+              return out
+
+          ctx=ssl.create_default_context()
+          with socket.create_connection((host,853),timeout=10) as raw:
+              with ctx.wrap_socket(raw,server_hostname=host) as tls:
+                  tls.sendall(struct.pack("!H",len(query))+query)
+                  size=struct.unpack("!H",read_exact(tls,2))[0]
+                  response=read_exact(tls,size)
+
+          rid, flags, qd, an, ns, ar = struct.unpack("!HHHHHH", response[:12])
+          print(f"Android-style response: bytes={len(response)} id=0x{rid:04x} qd={qd} an={an} ns={ns} ar={ar} rcode={flags & 0xF}")
+          if rid != txid:
+              raise SystemExit("Android validation: transaction ID mismatch")
+          if qd != 1:
+              raise SystemExit("Android validation: QDCOUNT is not 1")
+          print("ANDROID 10 VALIDATION PROBE: PASS")
+          PY
+
+      - name: Inspect served certificate chain
+        shell: bash
+        run: |
+          set -euxo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          timeout 15 openssl s_client             -connect techs.huggy.bond:853             -servername techs.huggy.bond             -showcerts </dev/null >"$tmp/chain.txt" 2>"$tmp/openssl.err"
+          cat "$tmp/openssl.err"
+          awk '
+            /-----BEGIN CERTIFICATE-----/ {n++; out=sprintf("%s/cert-%d.pem", dir, n)}
+            n {print > out}
+            /-----END CERTIFICATE-----/ {close(out)}
+          ' dir="$tmp" "$tmp/chain.txt"
+          count=0
+          for cert in "$tmp"/cert-*.pem; do
+            [ -f "$cert" ] || continue
+            count=$((count+1))
+            echo "=== served certificate $count ==="
+            openssl x509 -in "$cert" -noout -subject -issuer -dates -fingerprint -sha256
+          done
+          echo "Served chain certificate count: $count"
+          [ "$count" -ge 2 ]
+
       - name: IPv4-forced DoT query
         shell: bash
         run: |
