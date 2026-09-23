@@ -107,16 +107,16 @@ DNS TLS Certificate Password:
 
 Technitium can then use the same certificate for DoT, DoQ, and its encrypted DNS optional protocols as configured.
 
-### Automatic Let's Encrypt certificate with Cloudflare DNS
+### Automatic ZeroSSL certificate with Cloudflare DNS
 
-The bridge includes the pinned **lego ACME client** and can obtain a Let's Encrypt certificate using a Cloudflare DNS-01 challenge.
+The bridge includes the pinned **lego ACME client** and obtains a ZeroSSL RSA2048 certificate using a Cloudflare DNS-01 challenge. ZeroSSL ACME state is stored separately from the previous Let's Encrypt state so the CA change can be rolled back safely.
 
 In `/_bridge/`, enter:
 
 - the DNS hostname, for example `dns.example.com`
 - an ACME contact email
 - a Cloudflare API token
-- acceptance of the ACME / Let's Encrypt terms
+- acceptance of the ACME / ZeroSSL terms
 - whether automatic renewal should be enabled
 
 For the Cloudflare token, use a narrowly scoped token for the required zone with:
