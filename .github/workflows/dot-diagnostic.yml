@@ -1,5 +1,5 @@
 name: DoT diagnostic
-# diagnostic-generation: 2
+# diagnostic-generation: 3
 
 on:
   workflow_dispatch:
@@ -163,6 +163,122 @@ jobs:
           if qd != 1:
               raise SystemExit("Android validation: QDCOUNT is not 1")
           print("ANDROID 10 VALIDATION PROBE: PASS")
+          PY
+
+      - name: Android 13 persistent and pipelined DoT stress
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          import socket
+          import ssl
+          import struct
+          import time
+
+          HOST = "techs.huggy.bond"
+          PORT = 853
+          NAMES = [
+              "youtube.com",
+              "www.youtube.com",
+              "youtubei.googleapis.com",
+              "i.ytimg.com",
+              "googlevideo.com",
+              "beacons.gvt2.com",
+              "googleapis.com",
+          ]
+
+          def encode_name(name):
+              return b"".join(bytes([len(label)]) + label.encode("ascii") for label in name.split(".")) + b"\x00"
+
+          def query(txid, name, qtype):
+              msg = struct.pack("!HHHHHH", txid, 0x0100, 1, 0, 0, 0)
+              msg += encode_name(name)
+              msg += struct.pack("!HH", qtype, 1)
+              return struct.pack("!H", len(msg)) + msg
+
+          def read_exact(sock, count):
+              data = b""
+              while len(data) < count:
+                  chunk = sock.recv(count - len(data))
+                  if not chunk:
+                      raise RuntimeError(f"EOF after {len(data)}/{count} bytes")
+                  data += chunk
+              return data
+
+          def read_response(sock):
+              size = struct.unpack("!H", read_exact(sock, 2))[0]
+              data = read_exact(sock, size)
+              if len(data) < 12:
+                  raise RuntimeError("short DNS response")
+              rid, flags, qd, an, ns, ar = struct.unpack("!HHHHHH", data[:12])
+              if ((flags >> 15) & 1) != 1 or qd != 1:
+                  raise RuntimeError(f"invalid DNS response id={rid:#x} flags={flags:#x} qd={qd}")
+              return rid, flags & 0xF, an, len(data)
+
+          def open_tls(version=None):
+              ctx = ssl.create_default_context()
+              if version is not None:
+                  ctx.minimum_version = version
+                  ctx.maximum_version = version
+              raw = socket.create_connection((HOST, PORT), timeout=10)
+              raw.settimeout(15)
+              tls = ctx.wrap_socket(raw, server_hostname=HOST)
+              return raw, tls
+
+          # First prove both protocol versions that Android 13 may negotiate.
+          for version in (ssl.TLSVersion.TLSv1_2, ssl.TLSVersion.TLSv1_3):
+              raw, tls = open_tls(version)
+              try:
+                  tls.sendall(query(0x1100 + int(version), "youtube.com", 1))
+                  rid, rcode, an, size = read_response(tls)
+                  print(f"{tls.version()} single-query: id={rid:#x} rcode={rcode} answers={an} bytes={size}")
+              finally:
+                  tls.close()
+
+          # Android reuses a DoT connection. Exercise many sequential requests over one TLS socket.
+          raw, tls = open_tls()
+          started = time.monotonic()
+          try:
+              print("Persistent connection negotiated:", tls.version(), tls.cipher()[0])
+              for i in range(200):
+                  name = NAMES[i % len(NAMES)]
+                  qtype = 28 if i % 3 == 0 else 1
+                  txid = 0x2000 + i
+                  tls.sendall(query(txid, name, qtype))
+                  rid, rcode, an, size = read_response(tls)
+                  if rid != txid:
+                      raise RuntimeError(f"sequential ID mismatch: sent={txid:#x} got={rid:#x}")
+              print(f"PERSISTENT SEQUENTIAL DOT: PASS (200 queries in {time.monotonic()-started:.2f}s)")
+          finally:
+              tls.close()
+
+          # Send a burst without waiting for each answer, matching Android's ability to multiplex
+          # outstanding DNS transactions over a single RFC 7858 TLS stream.
+          raw, tls = open_tls()
+          try:
+              expected = set()
+              frames = []
+              for i in range(128):
+                  txid = 0x4000 + i
+                  expected.add(txid)
+                  name = NAMES[i % len(NAMES)]
+                  qtype = 28 if i % 2 == 0 else 1
+                  frames.append(query(txid, name, qtype))
+              tls.sendall(b"".join(frames))
+              seen = set()
+              for _ in range(len(expected)):
+                  rid, rcode, an, size = read_response(tls)
+                  if rid not in expected:
+                      raise RuntimeError(f"unexpected pipelined response ID {rid:#x}")
+                  if rid in seen:
+                      raise RuntimeError(f"duplicate pipelined response ID {rid:#x}")
+                  seen.add(rid)
+              missing = expected - seen
+              if missing:
+                  raise RuntimeError(f"missing {len(missing)} pipelined responses")
+              print("PIPELINED DOT: PASS (128 outstanding queries)")
+          finally:
+              tls.close()
           PY
 
       - name: Inspect served certificate chain and Android 10 trust anchor
