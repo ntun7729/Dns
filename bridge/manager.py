@@ -237,9 +237,30 @@ def migrate_dot_tls_proxy_toml(value: str) -> str:
     starts = [i for i, line in enumerate(lines) if line.strip() == "[[proxies]]"]
     starts.append(len(lines))
     for pos in range(len(starts) - 1):
-        start, end = starts[pos], starts[pos + 1]
-        block = "".join(lines[start:end])
-        name = re.search(r'(?m)^\s*name\s*=\s*"([^"]+)"\s*(path: Path, content: str, mode: int = 0o600) -> None:
+        block_start, block_end = starts[pos], starts[pos + 1]
+        block = "".join(lines[block_start:block_end])
+        name = re.search(r'(?m)^\s*name\s*=\s*"([^"]+)"\s*$', block)
+        ptype = re.search(r'(?m)^\s*type\s*=\s*"([^"]+)"\s*$', block)
+        local = re.search(r'(?m)^\s*localPort\s*=\s*(\d+)\s*$', block)
+        remote = re.search(r'(?m)^\s*remotePort\s*=\s*(\d+)\s*$', block)
+        if not (name and ptype and local and remote):
+            continue
+        if (
+            name.group(1) in {"dns-bridge-dot", "dot"}
+            and ptype.group(1) == "tcp"
+            and int(local.group(1)) == 853
+            and int(remote.group(1)) == 853
+        ):
+            for i in range(block_start, block_end):
+                if re.match(r"^\s*localPort\s*=\s*853\s*$", lines[i].rstrip("\r\n")):
+                    newline = "\n" if lines[i].endswith("\n") else ""
+                    indent = lines[i][: len(lines[i]) - len(lines[i].lstrip())]
+                    lines[i] = f"{indent}localPort = {DOT_TLS_PROXY_PORT}{newline}"
+                    break
+    return "".join(lines).rstrip() + "\n"
+
+
+def _safe_write(path: Path, content: str, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(content, encoding="utf-8")
