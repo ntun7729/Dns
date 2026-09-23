@@ -212,9 +212,29 @@ class BridgeTests(unittest.TestCase):
             status = certs.status()
             exported = certs.export_config()
             self.assertTrue(status["cloudflare_token_configured"])
+            self.assertEqual(status["acme_ca"], "ZeroSSL")
+            self.assertEqual(exported["acme_ca"], "zerossl")
             self.assertNotIn("api_token", exported)
             self.assertNotIn("super-secret-cloudflare-token", json.dumps(exported))
             self.assertEqual(exported["domain"], "dns.example.com")
+
+    def test_old_ca_terms_are_not_carried_to_zerossl(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            certs = CertificateManager(root_path / "bridge", root_path / "technitium")
+            certs.config_path.write_text(json.dumps({
+                "format": "dns-bridge-certificate-v1",
+                "mode": "cloudflare",
+                "domain": "dns.example.com",
+                "email": "admin@example.com",
+                "auto_renew": True,
+                "accept_tos": True,
+                "manage_dns_record": False,
+                "dns_target": "",
+            }), encoding="utf-8")
+            exported = certs.export_config()
+            self.assertEqual(exported["acme_ca"], "zerossl")
+            self.assertFalse(exported["accept_tos"])
 
     def test_cloudflare_a_record_sync_uses_frp_server_ip_and_dns_only(self):
         with tempfile.TemporaryDirectory() as root:
