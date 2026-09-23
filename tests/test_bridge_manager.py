@@ -160,6 +160,9 @@ class BridgeTests(unittest.TestCase):
             )
 
             self.assertEqual(first[:2], ["/usr/local/bin/lego", "run"])
+            self.assertEqual(certs.acme_dir.name, "acme-zerossl")
+            self.assertIn("--server", first)
+            self.assertEqual(first[first.index("--server") + 1], "zerossl")
             self.assertGreater(first.index("--email"), first.index("run"))
             self.assertGreater(first.index("--dns"), first.index("run"))
             self.assertGreater(first.index("--domains"), first.index("run"))
@@ -169,6 +172,7 @@ class BridgeTests(unittest.TestCase):
             self.assertNotIn("renew", first)
 
             self.assertEqual(renew[:2], ["/usr/local/bin/lego", "run"])
+            self.assertEqual(renew[renew.index("--server") + 1], "zerossl")
             self.assertIn("--key-type", renew)
             self.assertEqual(renew[renew.index("--key-type") + 1], "RSA2048")
             self.assertIn("--renew-days", renew)
@@ -177,6 +181,7 @@ class BridgeTests(unittest.TestCase):
             self.assertNotIn("renew", renew)
 
             self.assertEqual(compat[:2], ["/usr/local/bin/lego", "run"])
+            self.assertEqual(compat[compat.index("--server") + 1], "zerossl")
             self.assertIn("--key-type", compat)
             self.assertEqual(compat[compat.index("--key-type") + 1], "RSA2048")
             self.assertIn("--renew-force", compat)
