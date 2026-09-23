@@ -701,6 +701,7 @@ class CertificateManager:
         self.config_path = bridge_root / "certificate.json"
         self.token_path = bridge_root / "cloudflare-dns-api-token"
         self.acme_dir = bridge_root / "acme-zerossl"
+        self.legacy_cross_cert_path = Path(__file__).with_name("SectigoPublicServerAuthenticationRootR46_USERTrust.pem")
         self.cert_dir = technitium_config_dir / "certificates"
         self.cert_pem_path = self.cert_dir / "dns-tls.crt.pem"
         self.key_pem_path = self.cert_dir / "dns-tls.key.pem"
@@ -1113,6 +1114,47 @@ class CertificateManager:
         except (OSError, subprocess.TimeoutExpired):
             return True
 
+    def _legacy_cross_certificate_pem(self) -> str:
+        if not self.legacy_cross_cert_path.is_file():
+            raise ValueError(
+                "Bundled Sectigo R46 USERTrust cross certificate is missing; "
+                "cannot build the Android-compatible ZeroSSL chain."
+            )
+        pem = self.legacy_cross_cert_path.read_text(encoding="utf-8").strip() + "\n"
+        try:
+            info = self._openssl([
+                "x509", "-in", str(self.legacy_cross_cert_path), "-noout", "-subject", "-issuer"
+            ]).stdout.lower()
+        except ValueError as exc:
+            raise ValueError(f"Bundled ZeroSSL compatibility certificate is invalid: {exc}") from exc
+        if "sectigo public server authentication root r46" not in info:
+            raise ValueError("Bundled ZeroSSL compatibility certificate has the wrong subject.")
+        if "usertrust rsa certification authority" not in info:
+            raise ValueError("Bundled ZeroSSL compatibility certificate is not USERTrust cross-signed.")
+        return pem
+
+    def _installed_chain_has_legacy_cross_certificate(self) -> bool:
+        if not self.cert_pem_path.is_file():
+            return False
+        try:
+            installed = self.cert_pem_path.read_text(encoding="utf-8")
+            cross = self._legacy_cross_certificate_pem().strip()
+        except (OSError, ValueError):
+            return False
+        return cross in installed
+
+    def _install_lego_certificate(self, domain: str) -> None:
+        cert, key, issuer = self._find_lego_certificates(domain)
+        certificate_pem = cert.read_text(encoding="utf-8").strip() + "\n"
+        if issuer is not None:
+            certificate_pem = certificate_pem.rstrip() + "\n" + issuer.read_text(encoding="utf-8").strip() + "\n"
+        # ZeroSSL's current RSA intermediate chains to Sectigo R46. Android 13
+        # predates R46's addition to AOSP's CA store, so append Sectigo's official
+        # R46 cross-certificate to the long-standing USERTrust RSA root.
+        certificate_pem = certificate_pem.rstrip() + "\n" + self._legacy_cross_certificate_pem()
+        private_key_pem = key.read_text(encoding="utf-8")
+        self._install_pem(certificate_pem, private_key_pem)
+
     def _find_lego_certificates(self, domain: str) -> tuple[Path, Path, Path | None]:
         base = self.acme_dir / "certificates"
         cert = base / f"{domain}.crt"
@@ -1189,7 +1231,14 @@ class CertificateManager:
             self._sync_cloudflare_a_record(domain, target, token)
 
         if not first_issue and not force_compat_reissue and not self._expires_within(30):
-            self.last_output = "Certificate is already RSA and valid for more than 30 days; renewal is not due."
+            if not self._installed_chain_has_legacy_cross_certificate():
+                self._install_lego_certificate(domain)
+                self.last_output = (
+                    "Reinstalled the existing ZeroSSL certificate with the Sectigo R46 "
+                    "USERTrust cross-signed compatibility chain for Android 13."
+                )
+            else:
+                self.last_output = "Certificate is already RSA, Android-compatible, and valid for more than 30 days; renewal is not due."
             return
 
         command = self._build_lego_command(
@@ -1222,12 +1271,7 @@ class CertificateManager:
         if completed.returncode != 0:
             raise ValueError("ACME client failed: " + (output[-4000:] or "unknown error"))
 
-        cert, key, issuer = self._find_lego_certificates(domain)
-        certificate_pem = cert.read_text(encoding="utf-8")
-        if issuer is not None:
-            certificate_pem = certificate_pem.rstrip() + "\n" + issuer.read_text(encoding="utf-8").lstrip()
-        private_key_pem = key.read_text(encoding="utf-8")
-        self._install_pem(certificate_pem, private_key_pem)
+        self._install_lego_certificate(domain)
 
     def _worker(self) -> None:
         try:
@@ -1269,7 +1313,12 @@ class CertificateManager:
                     and lego_cert_path.is_file()
                     and self._certificate_key_algorithm(lego_cert_path) != "RSA"
                 )
-                if should_check and (needs_ca_migration or needs_android_compat or self._expires_within(30)):
+                needs_legacy_chain = bool(
+                    should_check
+                    and lego_cert_path.is_file()
+                    and not self._installed_chain_has_legacy_cross_certificate()
+                )
+                if should_check and (needs_ca_migration or needs_android_compat or needs_legacy_chain or self._expires_within(30)):
                     self.request_renew()
             except Exception as exc:
                 with self.lock:
@@ -1306,7 +1355,11 @@ class CertificateManager:
                 "certificate_exists": self.pfx_path.is_file(),
                 "acme_ca": ACME_CA_LABEL if cfg.get("mode") == "cloudflare" else None,
                 "key_algorithm": self._certificate_key_algorithm(),
-                "android_legacy_compatible": self._certificate_key_algorithm() == "RSA",
+                "legacy_cross_chain_installed": self._installed_chain_has_legacy_cross_certificate() if cfg.get("mode") == "cloudflare" else None,
+                "android_legacy_compatible": bool(
+                    self._certificate_key_algorithm() == "RSA"
+                    and (cfg.get("mode") != "cloudflare" or self._installed_chain_has_legacy_cross_certificate())
+                ),
                 "expires": self._expiry(),
                 "running": self.running,
                 "last_attempt": self.last_attempt,
@@ -1466,6 +1519,7 @@ class BridgeApp:
                             "certificate_exists": bool(cert_status.get("certificate_exists")),
                             "certificate_key_algorithm": cert_status.get("key_algorithm"),
                             "certificate_acme_ca": cert_status.get("acme_ca"),
+                            "certificate_legacy_cross_chain_installed": cert_status.get("legacy_cross_chain_installed"),
                             "android_legacy_compatible": bool(cert_status.get("android_legacy_compatible")),
                             "certificate_last_error": cert_status.get("last_error"),
                         },
