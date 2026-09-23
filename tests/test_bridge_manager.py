@@ -11,6 +11,8 @@ from manager import (  # noqa: E402
     CertificateManager,
     ConfigStore,
     DEFAULT_CONFIG,
+    DOT_TLS_PROXY_PORT,
+    migrate_dot_tls_proxy_toml,
     render_frpc_toml,
     sanitize_frpc_toml,
     validate_frp,
@@ -22,6 +24,7 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(set(DEFAULT_CONFIG["proxies"]), {"dot", "doq"})
         text = render_frpc_toml(DEFAULT_CONFIG)
         self.assertNotIn("localPort = 53", text)
+        self.assertIn(f"localPort = {DOT_TLS_PROXY_PORT}", text)
         self.assertNotIn("remotePort = 53", text)
 
     def test_validation_and_toml(self):
@@ -52,6 +55,27 @@ class BridgeTests(unittest.TestCase):
             sanitize_frpc_toml('serverAddr = "x.example"\nauth.token = "secret"\n')
         with self.assertRaises(ValueError):
             sanitize_frpc_toml('serverAddr = "x.example"\nauth.method = "token"\n')
+
+    def test_dot_toml_migrates_to_tls_compatibility_proxy(self):
+        raw = (
+            'serverAddr = "152.42.239.169"\n'
+            'serverPort = 7000\n\n'
+            '[[proxies]]\n'
+            'name = "dns-bridge-dot"\n'
+            'type = "tcp"\n'
+            'localIP = "127.0.0.1"\n'
+            'localPort = 853\n'
+            'remotePort = 853\n'
+        )
+        migrated = migrate_dot_tls_proxy_toml(raw)
+        self.assertIn(f"localPort = {DOT_TLS_PROXY_PORT}", migrated)
+        self.assertIn("remotePort = 853", migrated)
+        self.assertNotIn("localPort = 853", migrated)
+
+        with tempfile.TemporaryDirectory() as root:
+            store = ConfigStore(Path(root))
+            store.save_frpc_toml(raw, True)
+            self.assertIn(f"localPort = {DOT_TLS_PROXY_PORT}", store.get_frpc_toml())
 
     def test_raw_toml_round_trip(self):
         raw = (
