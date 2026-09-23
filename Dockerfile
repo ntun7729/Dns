@@ -63,6 +63,7 @@ RUN chmod 0755 /opt/dns-bridge/entrypoint.sh \
         -e 's|__PORT__|10000|g' \
         -e 's|__FIXED_LISTEN__||g' \
         -e 's|__TECH_WEB_BACKUP__||g' \
+        -e 's|__TECH_DOH_HTTP_PORT__|80|g' \
         -e 's|__TECH_DOH_BACKUP__||g' \
         /opt/dns-bridge/nginx.conf.template > /tmp/nginx.test.conf \
     && nginx -t -c /tmp/nginx.test.conf \
@@ -71,6 +72,7 @@ RUN chmod 0755 /opt/dns-bridge/entrypoint.sh \
 ENV PORT=10000 \
     TECHNITIUM_CONFIG_DIR=/data/technitium \
     DNS_BRIDGE_DATA_DIR=/data/bridge \
+    TECHNITIUM_DOH_HTTP_PORT=80 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
