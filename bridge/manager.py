@@ -602,6 +602,7 @@ class DotTlsProxy:
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind((self.listen_host, self.listen_port))
+        self.listen_port = int(listener.getsockname()[1])
         listener.listen(128)
         listener.settimeout(1.0)
         self.listener = listener
