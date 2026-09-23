@@ -109,7 +109,7 @@ Technitium can then use the same certificate for DoT, DoQ, and its encrypted DNS
 
 ### Automatic ZeroSSL certificate with Cloudflare DNS
 
-The bridge includes the pinned **lego ACME client** and obtains a ZeroSSL RSA2048 certificate using a Cloudflare DNS-01 challenge. ZeroSSL ACME state is stored separately from the previous Let's Encrypt state so the CA change can be rolled back safely. When migrating from another CA, acceptance of that CA's terms is not reused; the ZeroSSL terms checkbox must be accepted explicitly before the first ZeroSSL certificate is issued.
+The bridge includes the pinned **lego ACME client** and obtains a ZeroSSL RSA2048 certificate using a Cloudflare DNS-01 challenge. For Android 13 compatibility, the installed chain also includes Sectigo Public Server Authentication Root R46 cross-signed by the long-standing USERTrust RSA Certification Authority. ZeroSSL ACME state is stored separately from the previous Let's Encrypt state so the CA change can be rolled back safely. When migrating from another CA, acceptance of that CA's terms is not reused; the ZeroSSL terms checkbox must be accepted explicitly before the first ZeroSSL certificate is issued.
 
 In `/_bridge/`, enter:
 
