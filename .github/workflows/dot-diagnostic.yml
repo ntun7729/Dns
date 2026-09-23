@@ -23,12 +23,12 @@ jobs:
         run: |
           set -euxo pipefail
           echo "=== getent ahosts ==="
-          getent ahosts techs.huggy.bond || true
+          getent ahosts zero.huggy.bond || true
           echo
           echo "=== Python getaddrinfo ==="
           python3 - <<'PY'
           import socket
-          host = "techs.huggy.bond"
+          host = "zero.huggy.bond"
           seen = set()
           for family, socktype, proto, canonname, sockaddr in socket.getaddrinfo(host, 853, type=socket.SOCK_STREAM):
               key = (family, sockaddr[0])
@@ -42,7 +42,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          timeout 15 openssl s_client             -connect techs.huggy.bond:853             -servername techs.huggy.bond             -verify_hostname techs.huggy.bond             -verify_return_error             -brief </dev/null
+          timeout 15 openssl s_client             -connect zero.huggy.bond:853             -servername zero.huggy.bond             -verify_hostname zero.huggy.bond             -verify_return_error             -brief </dev/null
 
       - name: Real DNS-over-TLS query
         shell: bash
@@ -54,7 +54,7 @@ jobs:
           import ssl
           import struct
 
-          HOST = "techs.huggy.bond"
+          HOST = "zero.huggy.bond"
           PORT = 853
           QNAME = "google.com"
 
@@ -125,7 +125,7 @@ jobs:
           import struct
           import string
 
-          host = "techs.huggy.bond"
+          host = "zero.huggy.bond"
           alphabet = "abcdefhijklmnopqrstuvwxyzABCDEFHIJKLMNOPQRSTUVWXYZ0123456789"
           prefix = "".join(random.choice(alphabet) for _ in range(6))
           qname_text = prefix + "-dnsotls-ds.metric.gstatic.com"
@@ -175,7 +175,7 @@ jobs:
           import struct
           import time
 
-          HOST = "techs.huggy.bond"
+          HOST = "zero.huggy.bond"
           PORT = 853
           NAMES = [
               "youtube.com",
@@ -287,7 +287,7 @@ jobs:
           set -euxo pipefail
           tmp="$(mktemp -d)"
           trap 'rm -rf "$tmp"' EXIT
-          timeout 15 openssl s_client -connect techs.huggy.bond:853 -servername techs.huggy.bond -showcerts </dev/null >"$tmp/chain.txt" 2>"$tmp/openssl.err"
+          timeout 15 openssl s_client -connect zero.huggy.bond:853 -servername zero.huggy.bond -showcerts </dev/null >"$tmp/chain.txt" 2>"$tmp/openssl.err"
           cat "$tmp/openssl.err"
 
           python3 - "$tmp/chain.txt" "$tmp" <<'PY'
@@ -325,7 +325,7 @@ jobs:
           set -euxo pipefail
           python3 - <<'PY'
           import socket, ssl, struct
-          host = "techs.huggy.bond"
+          host = "zero.huggy.bond"
           ip = socket.gethostbyname(host)
           print("IPv4 target:", ip)
           qname = b"".join(bytes([len(x)]) + x.encode() for x in "example.com".split(".")) + b"\x00"
