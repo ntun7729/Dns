@@ -55,7 +55,7 @@ RUN set -eux; \
     rm -rf /tmp/lego* "/tmp/$archive"
 
 RUN mkdir -p /opt/dns-bridge /data/technitium /data/bridge /tmp/nginx-client /tmp/nginx-proxy
-COPY bridge/manager.py bridge/index.html /opt/dns-bridge/
+COPY bridge/manager.py bridge/index.html bridge/SectigoPublicServerAuthenticationRootR46_USERTrust.pem /opt/dns-bridge/
 COPY config/nginx.conf.template /opt/dns-bridge/nginx.conf.template
 COPY scripts/entrypoint.sh /opt/dns-bridge/entrypoint.sh
 RUN chmod 0755 /opt/dns-bridge/entrypoint.sh \
