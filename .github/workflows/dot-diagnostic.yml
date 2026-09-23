@@ -1,5 +1,5 @@
 name: DoT diagnostic
-# diagnostic-generation: 4
+# diagnostic-generation: 5
 
 on:
   workflow_dispatch:
@@ -279,6 +279,122 @@ jobs:
               print("PIPELINED DOT: PASS (128 outstanding queries)")
           finally:
               tls.close()
+          PY
+
+      - name: Compare direct Railway DoH with DoT for YouTube lookups
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          import socket
+          import ssl
+          import struct
+          import time
+          import urllib.request
+
+          DOT_HOST = "zero.huggy.bond"
+          DOH_URL = "https://dns-production-eebd.up.railway.app/dns-query"
+          NAMES = [
+              "youtube.com",
+              "www.youtube.com",
+              "youtubei.googleapis.com",
+              "i.ytimg.com",
+              "yt3.ggpht.com",
+              "googlevideo.com",
+              "beacons.gvt2.com",
+              "googleapis.com",
+          ]
+
+          def encode_name(name):
+              return b"".join(bytes([len(label)]) + label.encode("ascii") for label in name.split(".")) + b"\x00"
+
+          def wire(txid, name, qtype):
+              return (
+                  struct.pack("!HHHHHH", txid, 0x0100, 1, 0, 0, 0)
+                  + encode_name(name)
+                  + struct.pack("!HH", qtype, 1)
+              )
+
+          def parse(data):
+              if len(data) < 12:
+                  raise RuntimeError("short DNS response")
+              rid, flags, qd, an, ns, ar = struct.unpack("!HHHHHH", data[:12])
+              return rid, flags & 0xF, an, len(data)
+
+          def read_exact(sock, n):
+              out = b""
+              while len(out) < n:
+                  part = sock.recv(n - len(out))
+                  if not part:
+                      raise RuntimeError("EOF before full DNS response")
+                  out += part
+              return out
+
+          def stats(label, samples, failures):
+              samples = sorted(samples)
+              p50 = samples[len(samples)//2]
+              p95 = samples[max(0, int(len(samples)*0.95)-1)]
+              print(
+                  f"{label}: count={len(samples)} failures={failures} "
+                  f"min={samples[0]*1000:.1f}ms p50={p50*1000:.1f}ms "
+                  f"p95={p95*1000:.1f}ms max={samples[-1]*1000:.1f}ms"
+              )
+
+          dot_times = []
+          dot_failures = 0
+          ctx = ssl.create_default_context()
+          with socket.create_connection((DOT_HOST, 853), timeout=10) as raw:
+              raw.settimeout(10)
+              with ctx.wrap_socket(raw, server_hostname=DOT_HOST) as tls:
+                  for i in range(160):
+                      name = NAMES[i % len(NAMES)]
+                      qtype = 28 if i % 2 else 1
+                      txid = 0x6000 + i
+                      msg = wire(txid, name, qtype)
+                      started = time.monotonic()
+                      try:
+                          tls.sendall(struct.pack("!H", len(msg)) + msg)
+                          size = struct.unpack("!H", read_exact(tls, 2))[0]
+                          data = read_exact(tls, size)
+                          rid, rcode, an, _ = parse(data)
+                          if rid != txid or rcode != 0:
+                              raise RuntimeError(f"id={rid:#x} rcode={rcode} an={an}")
+                          dot_times.append(time.monotonic() - started)
+                      except Exception as exc:
+                          dot_failures += 1
+                          print("DoT failure", i, name, qtype, repr(exc))
+                          raise
+          stats("DoT via FRP", dot_times, dot_failures)
+
+          doh_times = []
+          doh_failures = 0
+          for i in range(160):
+              name = NAMES[i % len(NAMES)]
+              qtype = 28 if i % 2 else 1
+              txid = 0x7000 + i
+              msg = wire(txid, name, qtype)
+              req = urllib.request.Request(
+                  DOH_URL,
+                  data=msg,
+                  headers={
+                      "Content-Type": "application/dns-message",
+                      "Accept": "application/dns-message",
+                  },
+                  method="POST",
+              )
+              started = time.monotonic()
+              try:
+                  with urllib.request.urlopen(req, timeout=10) as response:
+                      data = response.read()
+                  rid, rcode, an, _ = parse(data)
+                  if rid != txid or rcode != 0:
+                      raise RuntimeError(f"id={rid:#x} rcode={rcode} an={an}")
+                  doh_times.append(time.monotonic() - started)
+              except Exception as exc:
+                  doh_failures += 1
+                  print("DoH failure", i, name, qtype, repr(exc))
+                  raise
+          stats("Direct Railway DoH", doh_times, doh_failures)
           PY
 
       - name: Verify Android 13 compatible certificate chain
