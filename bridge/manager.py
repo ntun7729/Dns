@@ -39,6 +39,7 @@ ACME_CA_LABEL = "ZeroSSL"
 
 DEFAULT_CERT_CONFIG = {
     "format": CERT_CONFIG_FORMAT,
+    "acme_ca": ACME_CA,
     "mode": "manual",
     "domain": "",
     "email": "",
@@ -732,14 +733,20 @@ class CertificateManager:
         except (OSError, json.JSONDecodeError):
             raw = {}
         cfg = json.loads(json.dumps(DEFAULT_CERT_CONFIG))
+        raw_ca = ""
         if isinstance(raw, Mapping):
+            raw_ca = str(raw.get("acme_ca") or "").strip().lower()
             cfg.update({k: raw.get(k, cfg[k]) for k in cfg})
         cfg["format"] = CERT_CONFIG_FORMAT
+        cfg["acme_ca"] = ACME_CA
         cfg["mode"] = "cloudflare" if cfg.get("mode") == "cloudflare" else "manual"
         cfg["domain"] = str(cfg.get("domain") or "").strip().lower().rstrip(".")
         cfg["email"] = str(cfg.get("email") or "").strip()
         cfg["auto_renew"] = bool(cfg.get("auto_renew"))
         cfg["accept_tos"] = bool(cfg.get("accept_tos"))
+        if cfg["mode"] == "cloudflare" and raw_ca != ACME_CA:
+            # Consent to another CA's terms cannot be carried over automatically.
+            cfg["accept_tos"] = False
         cfg["manage_dns_record"] = bool(cfg.get("manage_dns_record", True))
         cfg["dns_target"] = str(cfg.get("dns_target") or "").strip()
         return cfg
@@ -789,6 +796,7 @@ class CertificateManager:
         mode = "cloudflare" if cfg.get("mode") == "cloudflare" else "manual"
         document = json.loads(json.dumps(DEFAULT_CERT_CONFIG))
         document["mode"] = mode
+        document["acme_ca"] = ACME_CA
         if mode == "cloudflare":
             domain = str(cfg.get("domain") or "").strip()
             email = str(cfg.get("email") or "").strip()
@@ -797,7 +805,7 @@ class CertificateManager:
             if email:
                 document["email"] = self._validate_email(email)
             document["auto_renew"] = bool(cfg.get("auto_renew"))
-            document["accept_tos"] = bool(cfg.get("accept_tos"))
+            document["accept_tos"] = bool(cfg.get("accept_tos")) and str(cfg.get("acme_ca") or "").strip().lower() == ACME_CA
             document["manage_dns_record"] = bool(cfg.get("manage_dns_record", True))
             document["dns_target"] = str(cfg.get("dns_target") or "").strip()
         self._write_config(document)
@@ -982,6 +990,7 @@ class CertificateManager:
         dns_target = self._frp_ipv4(frpc_toml) if manage_dns_record else ""
         cfg = {
             "format": CERT_CONFIG_FORMAT,
+            "acme_ca": ACME_CA,
             "mode": "cloudflare",
             "domain": domain,
             "email": email,
