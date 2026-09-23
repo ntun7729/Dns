@@ -178,6 +178,20 @@ class BridgeTests(unittest.TestCase):
                 text=True,
             )
 
+    def test_certificate_chain_deduplication_preserves_order(self):
+        one = "-----BEGIN CERTIFICATE-----\nONE\n-----END CERTIFICATE-----\n"
+        two = "-----BEGIN CERTIFICATE-----\nTWO\n-----END CERTIFICATE-----\n"
+        three = "-----BEGIN CERTIFICATE-----\nTHREE\n-----END CERTIFICATE-----\n"
+        merged = CertificateManager._dedupe_pem_chain(
+            one + two,
+            two + three,
+            three,
+        )
+        self.assertEqual(
+            CertificateManager._pem_certificates(merged),
+            [one, two, three],
+        )
+
     def test_zerossl_android13_cross_certificate_is_pinned_usertrust_chain(self):
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
