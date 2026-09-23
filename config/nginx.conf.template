@@ -20,7 +20,7 @@ http {
     }
 
     upstream technitium_doh {
-        server 127.0.0.1:8053 max_fails=1 fail_timeout=1s;
+        server 127.0.0.1:__TECH_DOH_HTTP_PORT__ max_fails=1 fail_timeout=1s;
         __TECH_DOH_BACKUP__
     }
 
