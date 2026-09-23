@@ -1,5 +1,5 @@
 name: DoT diagnostic
-# diagnostic-generation: 3
+# diagnostic-generation: 4
 
 on:
   workflow_dispatch:
@@ -281,7 +281,7 @@ jobs:
               tls.close()
           PY
 
-      - name: Inspect served certificate chain and Android 10 trust anchor
+      - name: Verify Android 13 compatible certificate chain
         shell: bash
         run: |
           set -euxo pipefail
@@ -298,8 +298,8 @@ jobs:
           print("Served chain certificate count:", len(blocks))
           for i, block in enumerate(blocks, 1):
               (out / f"cert-{i}.pem").write_text(block + "\n")
-          if len(blocks) < 2:
-              raise SystemExit("Server did not provide an intermediate chain")
+          if len(blocks) < 3:
+              raise SystemExit("Android 13 compatibility chain is incomplete: expected leaf + ZeroSSL intermediate + USERTrust-cross-signed R46")
           PY
 
           for cert in "$tmp"/cert-*.pem; do
@@ -307,17 +307,17 @@ jobs:
             openssl x509 -in "$cert" -noout -subject -issuer -dates -fingerprint -sha256
           done
 
-          curl -fsSL https://letsencrypt.org/certs/isrgrootx1.pem -o "$tmp/isrg-root-x1.pem"
-          : > "$tmp/untrusted.pem"
-          for cert in "$tmp"/cert-2.pem "$tmp"/cert-3.pem "$tmp"/cert-4.pem; do
-            [ -f "$cert" ] && cat "$cert" >> "$tmp/untrusted.pem"
-          done
-          echo "=== Verify using only ISRG Root X1 ==="
-          if openssl verify -no-CApath -no-CAstore -CAfile "$tmp/isrg-root-x1.pem" -untrusted "$tmp/untrusted.pem" "$tmp/cert-1.pem"; then
-            echo "ISRG ROOT X1 ONLY: PASS"
-          else
-            echo "ISRG ROOT X1 ONLY: FAIL"
-          fi
+          cert3_info="$(openssl x509 -in "$tmp/cert-3.pem" -noout -subject -issuer -fingerprint -sha256)"
+          echo "$cert3_info"
+          echo "$cert3_info" | grep -q "subject=.*Sectigo Public Server Authentication Root R46"
+          echo "$cert3_info" | grep -q "issuer=.*USERTrust RSA Certification Authority"
+          echo "$cert3_info" | grep -qi "92:F3:51:BF:3D:54:16:4D:FA:8D:D8:F9:E1:13:9D:31:50:34:97:86:48:5D:2B:9E:EC:D0:0E:29:71:C1:E6:C5"
+
+          curl -fsSL https://crt.sectigo.com/USERTrustRSACertificationAuthority.crt -o "$tmp/usertrust.der"
+          openssl x509 -inform DER -in "$tmp/usertrust.der" -out "$tmp/usertrust.pem"
+          cat "$tmp/cert-2.pem" "$tmp/cert-3.pem" > "$tmp/untrusted.pem"
+          openssl verify -no-CApath -no-CAstore -CAfile "$tmp/usertrust.pem" -untrusted "$tmp/untrusted.pem" "$tmp/cert-1.pem"
+          echo "ANDROID 13 USERTRUST CHAIN: PASS"
 
       - name: IPv4-forced DoT query
         shell: bash
