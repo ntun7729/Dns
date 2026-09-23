@@ -1,5 +1,9 @@
 import json
+import socket
+import ssl
 import subprocess
+import threading
+import time
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +14,7 @@ from manager import (  # noqa: E402
     BACKUP_FORMAT,
     CertificateManager,
     ConfigStore,
+    DotTlsProxy,
     DEFAULT_CONFIG,
     DOT_TLS_PROXY_PORT,
     migrate_dot_tls_proxy_toml,
@@ -197,6 +202,69 @@ class BridgeTests(unittest.TestCase):
                 "50:34:97:86:48:5D:2B:9E:EC:D0:0E:29:71:C1:E6:C5",
                 info,
             )
+
+    def test_dot_tls_proxy_forwards_dns_tcp_frames(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            cert_file = root_path / "dot.crt"
+            key_file = root_path / "dot.key"
+            subprocess.run(
+                [
+                    "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                    "-keyout", str(key_file), "-out", str(cert_file),
+                    "-subj", "/CN=dns.example.com", "-days", "1",
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            backend = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            backend.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            backend.bind(("127.0.0.1", 0))
+            backend.listen(1)
+            backend_port = backend.getsockname()[1]
+
+            def echo_backend():
+                conn, _ = backend.accept()
+                with conn:
+                    header = conn.recv(2)
+                    size = int.from_bytes(header, "big")
+                    payload = b""
+                    while len(payload) < size:
+                        payload += conn.recv(size - len(payload))
+                    conn.sendall(header + payload)
+
+            backend_thread = threading.Thread(target=echo_backend, daemon=True)
+            backend_thread.start()
+
+            proxy = DotTlsProxy(
+                cert_file,
+                key_file,
+                listen_port=0,
+                upstream_port=backend_port,
+            )
+            proxy.start()
+            deadline = time.time() + 3
+            while proxy.listener is None and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertIsNotNone(proxy.listener)
+
+            client_context = ssl._create_unverified_context()
+            try:
+                with socket.create_connection(("127.0.0.1", proxy.listen_port), timeout=3) as raw:
+                    with client_context.wrap_socket(raw, server_hostname="dns.example.com") as tls:
+                        frame = b"\x00\x03abc"
+                        tls.sendall(frame)
+                        received = b""
+                        while len(received) < len(frame):
+                            received += tls.recv(len(frame) - len(received))
+                        self.assertEqual(received, frame)
+            finally:
+                proxy.stop()
+                backend.close()
+            backend_thread.join(timeout=2)
 
     def test_lego_v5_run_command_places_flags_after_subcommand(self):
         with tempfile.TemporaryDirectory() as root:
