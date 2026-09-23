@@ -50,6 +50,7 @@ RUN set -eux; \
     lego --version; \
     lego run --help | grep -q -- "--email"; \
     lego run --help | grep -q -- "--dns"; \
+    lego run --help | grep -q -- "--server"; \
     lego run --help | grep -q -- "--renew-days"; \
     rm -rf /tmp/lego* "/tmp/$archive"
 
