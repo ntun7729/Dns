@@ -36,6 +36,7 @@ CERT_CONFIG_FORMAT = "dns-bridge-certificate-v1"
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 ACME_CA = "zerossl"
 ACME_CA_LABEL = "ZeroSSL"
+LEGACY_CROSS_CERT_SHA256 = "92F351BF3D54164DFA8DD8F9E1139D3150349786485D2B9EECD00E2971C1E6C5"
 
 DEFAULT_CERT_CONFIG = {
     "format": CERT_CONFIG_FORMAT,
@@ -1123,14 +1124,19 @@ class CertificateManager:
         pem = self.legacy_cross_cert_path.read_text(encoding="utf-8").strip() + "\n"
         try:
             info = self._openssl([
-                "x509", "-in", str(self.legacy_cross_cert_path), "-noout", "-subject", "-issuer"
-            ]).stdout.lower()
+                "x509", "-in", str(self.legacy_cross_cert_path), "-noout",
+                "-subject", "-issuer", "-fingerprint", "-sha256"
+            ]).stdout
         except ValueError as exc:
             raise ValueError(f"Bundled ZeroSSL compatibility certificate is invalid: {exc}") from exc
-        if "sectigo public server authentication root r46" not in info:
+        lowered = info.lower()
+        if "sectigo public server authentication root r46" not in lowered:
             raise ValueError("Bundled ZeroSSL compatibility certificate has the wrong subject.")
-        if "usertrust rsa certification authority" not in info:
+        if "usertrust rsa certification authority" not in lowered:
             raise ValueError("Bundled ZeroSSL compatibility certificate is not USERTrust cross-signed.")
+        fingerprint = re.sub(r"[^0-9A-F]", "", info.upper().split("SHA256 FINGERPRINT=", 1)[-1])
+        if fingerprint != LEGACY_CROSS_CERT_SHA256:
+            raise ValueError("Bundled ZeroSSL compatibility certificate fingerprint does not match the pinned Sectigo R46 cross-certificate.")
         return pem
 
     def _installed_chain_has_legacy_cross_certificate(self) -> bool:
