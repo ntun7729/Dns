@@ -149,6 +149,31 @@ class BridgeTests(unittest.TestCase):
                 text=True,
             )
 
+    def test_zerossl_android13_cross_certificate_is_pinned_usertrust_chain(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            certs = CertificateManager(root_path / "bridge", root_path / "technitium")
+            pem = certs._legacy_cross_certificate_pem()
+            self.assertIn("BEGIN CERTIFICATE", pem)
+            info = subprocess.run(
+                [
+                    "openssl", "x509",
+                    "-in", str(certs.legacy_cross_cert_path),
+                    "-noout", "-subject", "-issuer", "-fingerprint", "-sha256",
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            ).stdout
+            self.assertIn("Sectigo Public Server Authentication Root R46", info)
+            self.assertIn("USERTrust RSA Certification Authority", info)
+            self.assertIn(
+                "92:F3:51:BF:3D:54:16:4D:FA:8D:D8:F9:E1:13:9D:31:"
+                "50:34:97:86:48:5D:2B:9E:EC:D0:0E:29:71:C1:E6:C5",
+                info,
+            )
+
     def test_lego_v5_run_command_places_flags_after_subcommand(self):
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
