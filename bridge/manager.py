@@ -34,6 +34,8 @@ MAX_BODY_BYTES = 2 * 1024 * 1024
 MAX_TOML_BYTES = 128 * 1024
 CERT_CONFIG_FORMAT = "dns-bridge-certificate-v1"
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+ACME_CA = "zerossl"
+ACME_CA_LABEL = "ZeroSSL"
 
 DEFAULT_CERT_CONFIG = {
     "format": CERT_CONFIG_FORMAT,
@@ -697,7 +699,7 @@ class CertificateManager:
         self.openssl_binary = openssl_binary
         self.config_path = bridge_root / "certificate.json"
         self.token_path = bridge_root / "cloudflare-dns-api-token"
-        self.acme_dir = bridge_root / "acme"
+        self.acme_dir = bridge_root / "acme-zerossl"
         self.cert_dir = technitium_config_dir / "certificates"
         self.cert_pem_path = self.cert_dir / "dns-tls.crt.pem"
         self.key_pem_path = self.cert_dir / "dns-tls.key.pem"
@@ -1132,13 +1134,13 @@ class CertificateManager:
         first_issue: bool,
         force_compat_reissue: bool = False,
     ) -> list[str]:
-        # Use RSA2048 intentionally. Let's Encrypt's current ECDSA Generation-Y
-        # chain is rooted through ISRG Root X2, which is not in older Android
-        # trust stores. The RSA Generation-Y hierarchy is cross-signed from the
-        # older, widely deployed ISRG Root X1.
+        # Use ZeroSSL RSA2048 intentionally for the Android 13 compatibility A/B test.
+        # Keep this ACME state in its own directory so the previous Let's Encrypt
+        # account/certificate material remains intact for rollback.
         command = [
             self.lego_binary,
             "run",
+            "--server", ACME_CA,
             "--email", email,
             "--dns", "cloudflare",
             "--domains", domain,
@@ -1170,7 +1172,7 @@ class CertificateManager:
         current_key_algorithm = self._certificate_key_algorithm(lego_cert_path)
         force_compat_reissue = bool(not first_issue and current_key_algorithm != "RSA")
         if first_issue and not cfg.get("accept_tos"):
-            raise ValueError("Accept the ACME/Let's Encrypt terms before requesting the first certificate.")
+            raise ValueError("Accept the ACME / ZeroSSL terms before requesting the first certificate.")
         if cfg.get("manage_dns_record"):
             target = str(cfg.get("dns_target") or "").strip()
             if not target:
@@ -1242,8 +1244,8 @@ class CertificateManager:
         return True
 
     def _auto_loop(self) -> None:
-        # Run the first certificate check shortly after container startup so
-        # older persisted EC/X2 certificates are migrated automatically.
+        # Run the first certificate check shortly after container startup. A missing
+        # ZeroSSL certificate state means this deployment still needs the CA migration.
         if self.stop_event.wait(10):
             return
         while not self.stop_event.is_set():
@@ -1252,12 +1254,13 @@ class CertificateManager:
                     cfg = self._read_config()
                     should_check = cfg.get("mode") == "cloudflare" and bool(cfg.get("auto_renew")) and self.token_path.is_file()
                 lego_cert_path = self.acme_dir / "certificates" / f"{cfg.get('domain', '')}.crt"
+                needs_ca_migration = bool(should_check and not lego_cert_path.is_file())
                 needs_android_compat = bool(
                     should_check
                     and lego_cert_path.is_file()
                     and self._certificate_key_algorithm(lego_cert_path) != "RSA"
                 )
-                if should_check and (needs_android_compat or self._expires_within(30)):
+                if should_check and (needs_ca_migration or needs_android_compat or self._expires_within(30)):
                     self.request_renew()
             except Exception as exc:
                 with self.lock:
@@ -1292,6 +1295,7 @@ class CertificateManager:
                 "pfx_path": str(self.pfx_path),
                 "pfx_password": "",
                 "certificate_exists": self.pfx_path.is_file(),
+                "acme_ca": ACME_CA_LABEL if cfg.get("mode") == "cloudflare" else None,
                 "key_algorithm": self._certificate_key_algorithm(),
                 "android_legacy_compatible": self._certificate_key_algorithm() == "RSA",
                 "expires": self._expiry(),
@@ -1452,6 +1456,7 @@ class BridgeApp:
                             "dot_local_ready": app.supervisor._tcp_probe(853),
                             "certificate_exists": bool(cert_status.get("certificate_exists")),
                             "certificate_key_algorithm": cert_status.get("key_algorithm"),
+                            "certificate_acme_ca": cert_status.get("acme_ca"),
                             "android_legacy_compatible": bool(cert_status.get("android_legacy_compatible")),
                             "certificate_last_error": cert_status.get("last_error"),
                         },
