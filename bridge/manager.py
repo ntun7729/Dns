@@ -544,7 +544,10 @@ class DotTlsProxy:
         upstream.settimeout(None)
         peers = (tls_sock, upstream)
         while True:
-            readable, _, _ = select.select(peers, [], [], 60.0)
+            if tls_sock.pending() > 0:
+                readable = [tls_sock]
+            else:
+                readable, _, _ = select.select(peers, [], [], 60.0)
             if not readable:
                 continue
             for src in readable:
@@ -566,7 +569,7 @@ class DotTlsProxy:
                         self.accepted_connections += 1
                         self.last_error = None
                     self._relay(tls_sock, upstream)
-        except (OSError, ssl.SSLError, FileNotFoundError) as exc:
+        except (OSError, ssl.SSLError, FileNotFoundError, ValueError) as exc:
             with self.lock:
                 self.last_error = f"{type(exc).__name__}: {exc}"
             try:
