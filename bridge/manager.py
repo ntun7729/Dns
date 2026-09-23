@@ -1318,6 +1318,42 @@ class CertificateManager:
             raise ValueError("Bundled ZeroSSL compatibility certificate fingerprint does not match the pinned Sectigo R46 cross-certificate.")
         return pem
 
+    @staticmethod
+    def _pem_certificates(value: str) -> list[str]:
+        return [
+            block.strip() + "\n"
+            for block in re.findall(
+                r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+                value,
+                re.S,
+            )
+        ]
+
+    @classmethod
+    def _dedupe_pem_chain(cls, *parts: str) -> str:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for part in parts:
+            for block in cls._pem_certificates(part):
+                identity = re.sub(r"\s+", "", block)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                ordered.append(block)
+        if not ordered:
+            raise ValueError("Certificate chain contains no PEM certificates.")
+        return "".join(ordered)
+
+    def _installed_chain_is_clean(self) -> bool:
+        if not self.cert_pem_path.is_file():
+            return False
+        try:
+            blocks = self._pem_certificates(self.cert_pem_path.read_text(encoding="utf-8"))
+        except OSError:
+            return False
+        identities = [re.sub(r"\s+", "", block) for block in blocks]
+        return len(blocks) == 3 and len(set(identities)) == 3
+
     def _installed_chain_has_legacy_cross_certificate(self) -> bool:
         if not self.cert_pem_path.is_file():
             return False
@@ -1330,13 +1366,14 @@ class CertificateManager:
 
     def _install_lego_certificate(self, domain: str) -> None:
         cert, key, issuer = self._find_lego_certificates(domain)
-        certificate_pem = cert.read_text(encoding="utf-8").strip() + "\n"
+        parts = [cert.read_text(encoding="utf-8")]
         if issuer is not None:
-            certificate_pem = certificate_pem.rstrip() + "\n" + issuer.read_text(encoding="utf-8").strip() + "\n"
+            parts.append(issuer.read_text(encoding="utf-8"))
         # ZeroSSL's current RSA intermediate chains to Sectigo R46. Android 13
         # predates R46's addition to AOSP's CA store, so append Sectigo's official
         # R46 cross-certificate to the long-standing USERTrust RSA root.
-        certificate_pem = certificate_pem.rstrip() + "\n" + self._legacy_cross_certificate_pem()
+        parts.append(self._legacy_cross_certificate_pem())
+        certificate_pem = self._dedupe_pem_chain(*parts)
         private_key_pem = key.read_text(encoding="utf-8")
         self._install_pem(certificate_pem, private_key_pem)
 
@@ -1416,14 +1453,17 @@ class CertificateManager:
             self._sync_cloudflare_a_record(domain, target, token)
 
         if not first_issue and not force_compat_reissue and not self._expires_within(30):
-            if not self._installed_chain_has_legacy_cross_certificate():
+            if (
+                not self._installed_chain_has_legacy_cross_certificate()
+                or not self._installed_chain_is_clean()
+            ):
                 self._install_lego_certificate(domain)
                 self.last_output = (
-                    "Reinstalled the existing ZeroSSL certificate with the Sectigo R46 "
-                    "USERTrust cross-signed compatibility chain for Android 13."
+                    "Reinstalled the existing ZeroSSL certificate as a clean three-certificate "
+                    "Android-compatible chain."
                 )
             else:
-                self.last_output = "Certificate is already RSA, Android-compatible, and valid for more than 30 days; renewal is not due."
+                self.last_output = "Certificate is already RSA, Android-compatible, clean, and valid for more than 30 days; renewal is not due."
             return
 
         command = self._build_lego_command(
@@ -1503,7 +1543,18 @@ class CertificateManager:
                     and lego_cert_path.is_file()
                     and not self._installed_chain_has_legacy_cross_certificate()
                 )
-                if should_check and (needs_ca_migration or needs_android_compat or needs_legacy_chain or self._expires_within(30)):
+                needs_chain_cleanup = bool(
+                    should_check
+                    and lego_cert_path.is_file()
+                    and not self._installed_chain_is_clean()
+                )
+                if should_check and (
+                    needs_ca_migration
+                    or needs_android_compat
+                    or needs_legacy_chain
+                    or needs_chain_cleanup
+                    or self._expires_within(30)
+                ):
                     self.request_renew()
             except Exception as exc:
                 with self.lock:
@@ -1541,6 +1592,7 @@ class CertificateManager:
                 "acme_ca": ACME_CA_LABEL if cfg.get("mode") == "cloudflare" else None,
                 "key_algorithm": self._certificate_key_algorithm(),
                 "legacy_cross_chain_installed": self._installed_chain_has_legacy_cross_certificate() if cfg.get("mode") == "cloudflare" else None,
+                "certificate_chain_clean": self._installed_chain_is_clean() if cfg.get("mode") == "cloudflare" else None,
                 "android_legacy_compatible": bool(
                     self._certificate_key_algorithm() == "RSA"
                     and (cfg.get("mode") != "cloudflare" or self._installed_chain_has_legacy_cross_certificate())
